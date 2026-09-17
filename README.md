@@ -70,39 +70,37 @@
 
 ## 二、架构设计
 
-```
-用户浏览器
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│              控制面 (FastAPI)                │
-│                                             │
-│  ┌───────────┐  ┌──────────┐ ┌──────────┐ │
-│  │ 环境检测    │  │ 模型目录   │ │ 推荐引擎  │ │
-│  │ nvidia-smi │  │ HF/MS    │ │ 规则评分  │ │
-│  │ docker/wsl │  │ 本地扫描   │ │ 在线LLM  │ │
-│  └──────┬─────┘  └────┬─────┘ └────┬─────┘ │
-│         │              │            │       │
-│  ┌──────▼──────────────▼────────────▼─────┐ │
-│  │           参数规划器                     │ │
-│  │  显存估算 → 命令生成 → 风险评估          │ │
-│  └──────────────────┬────────────────────┘ │
-│                     │                       │
-│  ┌──────────────────▼────────────────────┐ │
-│  │           部署编排器                     │ │
-│  │  创建 → 校验 → 启动 → 健康检查 → RUNNING │ │
-│  └──────────────────┬────────────────────┘ │
-│                     │                       │
-│  ┌──────────────────▼────────────────────┐ │
-│  │           运行时适配层                   │ │
-│  │  vLLM · SGLang · Ollama · Transformers  │ │
-│  └─────────────────────────────────────────┘ │
-└─────────────────────────────────────────────┘
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-   本地进程      Docker      WSL2
-   (subprocess) (compose)   (wsl exec)
+```mermaid
+flowchart TB
+    User[用户浏览器]
+
+    subgraph ControlPlane[控制面 FastAPI]
+        Env[环境检测<br/>nvidia-smi · docker · wsl]
+        Catalog[模型目录<br/>HuggingFace · ModelScope · 本地扫描]
+        Recommend[推荐引擎<br/>规则评分 · 在线LLM]
+        Planner[参数规划器<br/>显存估算 → 命令生成 → 风险评估]
+        Deploy[部署编排器<br/>创建 → 校验 → 启动 → 健康检查 → RUNNING]
+        Runtime[运行时适配层<br/>vLLM · SGLang · Ollama · Transformers]
+    end
+
+    subgraph Host[宿主机]
+        GPU[GPU / CUDA / Driver]
+        DockerRT[Docker + NVIDIA Toolkit]
+        WSL[WSL2 + GPU 映射]
+        LocalModels[本地模型目录]
+    end
+
+    User --> ControlPlane
+    Env --> GPU
+    Env --> DockerRT
+    Env --> WSL
+    Catalog --> LocalModels
+    Env --> Planner
+    Catalog --> Recommend
+    Recommend --> Planner
+    Planner --> Deploy
+    Deploy --> Runtime
+    Runtime --> Host
 ```
 
 ### 部署模式
