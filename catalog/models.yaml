@@ -1,0 +1,29 @@
+models:
+  - id: qwen3-8b-bf16
+    base_model: Qwen3-8B
+    precision: bf16
+    quantization: null
+    memory_gb: 18
+    capabilities: [chat, reasoning, tool_calling, chinese]
+    backends: [vllm, sglang]
+  - id: qwen3-8b-fp8
+    base_model: Qwen3-8B
+    precision: fp8
+    quantization: fp8
+    memory_gb: 12
+    capabilities: [chat, reasoning, tool_calling, chinese]
+    backends: [vllm, sglang]
+  - id: qwen3-8b-awq
+    base_model: Qwen3-8B
+    precision: int4
+    quantization: awq
+    memory_gb: 9
+    capabilities: [chat, reasoning, tool_calling, chinese]
+    backends: [vllm, sglang]
+  - id: qwen3-8b-gptq
+    base_model: Qwen3-8B
+    precision: int4
+    quantization: gptq
+    memory_gb: 9
+    capabilities: [chat, reasoning, tool_calling, chinese]
+    backends: [vllm, sglang]

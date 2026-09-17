@@ -1,0 +1,8 @@
+runtimes:
+  vllm:
+    command: vllm serve
+  sglang:
+    command: python -m sglang.launch_server
+policy:
+  default_host: 127.0.0.1
+  default_gpu_memory_utilization: 0.9
