@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from pydantic import BaseModel
@@ -6,6 +7,22 @@ from .services import environment, models, planner, deployments
 from .runtimes import ollama_runtime
 
 app = FastAPI(title="Model Deploy Platform", version="0.2.0")
+
+# LAN control plane: allow other machines on the network to call the API.
+# This is an unauthenticated control plane, so only expose it on trusted nets.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _public_host(request: Request) -> str:
+    """Host a remote caller should use, derived from the request itself."""
+    host = request.headers.get("host") or request.url.hostname or "127.0.0.1"
+    return host.split(":")[0]
+
 
 @app.get("/api/health")
 def health():
@@ -49,10 +66,11 @@ class DeployRequest(BaseModel):
     model_name: str | None = None
 
 @app.post("/api/deployments")
-def create_deployment(req: DeployRequest):
+def create_deployment(req: DeployRequest, request: Request):
     return deployments.create(
         model_path=req.model_path, model_id=req.model_id, backend=req.backend,
-        port=req.port, dtype=req.dtype, quantization=req.quantization, model_name=req.model_name
+        port=req.port, dtype=req.dtype, quantization=req.quantization, model_name=req.model_name,
+        public_host=_public_host(request),
     )
 
 @app.post("/api/deployments/{dep_id}/start")
@@ -70,6 +88,19 @@ def list_deployments():
 @app.get("/api/deployments/{dep_id}")
 def get_deployment(dep_id: str):
     return deployments.get(dep_id)
+
+@app.get("/api/deployments/{dep_id}/health")
+def deployment_health(dep_id: str):
+    return deployments.health(dep_id)
+
+class DeploymentTestRequest(BaseModel):
+    message: str = "你好，请用一句话介绍你自己"
+    model_name: str | None = None
+    max_tokens: int = 128
+
+@app.post("/api/deployments/{dep_id}/test")
+def deployment_test(dep_id: str, req: DeploymentTestRequest):
+    return deployments.test_chat(dep_id, req.message, req.model_name, req.max_tokens)
 
 @app.get("/api/backends")
 def backends():

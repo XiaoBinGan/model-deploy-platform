@@ -21,9 +21,9 @@ def post(path, data):
             headers={"Content-Type": "application/json"},
         )
         r = urllib.request.urlopen(req, timeout=60)
-        body = r.read(300).decode("utf-8", "replace")
+        body = r.read().decode("utf-8", "replace")
         print(f"POST {path} {r.status} {body[:120]}")
-        return json.loads(body)
+        return json.loads(body) if body.strip() else None
     except Exception as e:
         print(f"POST {path} FAIL {e}")
         return None

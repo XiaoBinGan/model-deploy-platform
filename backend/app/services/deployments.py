@@ -29,6 +29,7 @@ def _detect_backends() -> list[str]:
             backends.append("sglang")
     except Exception:
         pass
+    # Apple Silicon commonly uses Ollama or native Transformers; CUDA-only runtimes are not assumed.
     # Check transformers (always available if torch installed)
     try:
         import importlib
@@ -41,7 +42,7 @@ def _detect_backends() -> list[str]:
 def available_backends() -> dict:
     return {"backends": _detect_backends()}
 
-def create(model_path: str, model_id: str, backend: str | None = None, port: int = 8000, dtype: str = "bfloat16", quantization: str | None = None, model_name: str | None = None) -> dict:
+def create(model_path: str, model_id: str, backend: str | None = None, port: int = 8000, dtype: str = "bfloat16", quantization: str | None = None, model_name: str | None = None, public_host: str | None = None) -> dict:
     dep_id = f"dep_{int(time.time())}"
     detected = _detect_backends()
     actual_backend = backend or (detected[0] if detected else "transformers")
@@ -51,19 +52,26 @@ def create(model_path: str, model_id: str, backend: str | None = None, port: int
         port = 11434
         model_path = model_name or model_id
 
+    # host is the loopback used for server-side checks; display_host is what a
+    # LAN client should use. They differ when the platform is reached over the
+    # network, and conflating them produces endpoints that only work locally.
+    host = "127.0.0.1"
+    display_host = public_host or host
+
     deployment = {
         "id": dep_id,
         "model_path": model_path,
         "model_id": model_id,
         "backend": actual_backend,
         "port": port,
-        "host": "127.0.0.1",
+        "host": host,
+        "display_host": display_host,
         "dtype": dtype,
         "quantization": quantization,
         "status": "CREATED",
         "pid": None,
-        "endpoint": f"http://127.0.0.1:{port}/v1",
-        "health_endpoint": f"http://127.0.0.1:{port}/health" if actual_backend != "ollama" else f"http://127.0.0.1:{port}/api/tags",
+        "endpoint": f"http://{display_host}:{port}/v1",
+        "health_endpoint": f"http://{display_host}:{port}/health" if actual_backend != "ollama" else f"http://{display_host}:{port}/api/tags",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "log": [],
     }
@@ -163,3 +171,44 @@ def get(deployment_id: str) -> dict:
 
 def list_all() -> list[dict]:
     return list(DEPLOYMENTS.values())
+
+def health(deployment_id: str) -> dict:
+    """Real health check against the running service, not a status flag."""
+    dep = DEPLOYMENTS.get(deployment_id)
+    if not dep:
+        raise ValueError(f"Deployment {deployment_id} not found")
+    url = dep["health_endpoint"]
+    try:
+        r = httpx.get(url, timeout=5)
+        return {"deployment_id": deployment_id, "url": url, "status_code": r.status_code,
+                "healthy": r.status_code == 200, "status": dep["status"]}
+    except Exception as e:
+        return {"deployment_id": deployment_id, "url": url, "healthy": False,
+                "error": str(e), "status": dep["status"]}
+
+def test_chat(deployment_id: str, message: str = "你好，请用一句话介绍你自己",
+              model_name: str | None = None, max_tokens: int = 128) -> dict:
+    """Send a real OpenAI-compatible chat completion to the deployed service."""
+    dep = DEPLOYMENTS.get(deployment_id)
+    if not dep:
+        raise ValueError(f"Deployment {deployment_id} not found")
+    model = model_name or dep["model_path"]
+    url = f"http://{dep['host']}:{dep['port']}/v1/chat/completions"
+    try:
+        r = httpx.post(url, json={
+            "model": model,
+            "messages": [{"role": "user", "content": message}],
+            "max_tokens": max_tokens,
+        }, timeout=120)
+        if r.status_code != 200:
+            return {"ok": False, "url": url, "status_code": r.status_code, "error": r.text[:500]}
+        data = r.json()
+        reply = ""
+        try:
+            reply = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            reply = json.dumps(data)[:500]
+        return {"ok": True, "url": url, "status_code": r.status_code, "model": model,
+                "reply": reply, "usage": data.get("usage", {})}
+    except Exception as e:
+        return {"ok": False, "url": url, "error": str(e)}

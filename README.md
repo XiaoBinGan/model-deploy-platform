@@ -39,7 +39,7 @@
 
 **R3 — 后端选择**
 
-- vLLM、SGLang、Ollama、Transformers 四种后端
+- vLLM、SGLang、Ollama、Transformers 四种后端；Apple Silicon (M 系列) 优先使用 Ollama 或 Transformers/MLX，不能按 CUDA 显卡处理
 - 自动检测已安装后端
 - 按兼容性评分推荐
 
@@ -103,6 +103,14 @@ flowchart TB
     Runtime --> Host
 ```
 
+### Apple Silicon（Mac M 系列）
+
+- 通过 `platform.system()` / `platform.machine()` 和 `sysctl hw.memsize` 识别 Apple Silicon。
+- Apple GPU 使用 Metal，显存不是独立 VRAM，而是与 CPU 共享统一内存；规划时使用统一内存安全预算。
+- 不使用 `nvidia-smi`、CUDA、WSL2，也不将 CUDA 版 vLLM/SGLang 标记为可用。
+- 推荐后端：Ollama；已安装 PyTorch/Transformers 时可使用 Transformers。需要更高性能时可接入 MLX/MLX-LM。
+- Apple Silicon 推荐模型应优先选择 0.5B–14B 的 GGUF（Ollama）或 MLX 转换权重，而不是 AWQ/GPTQ/FP8 CUDA checkpoint。
+
 ### 部署模式
 
 | 模式 | 适用场景 | 状态 |
@@ -133,17 +141,21 @@ model-deploy-platform/
 │   ├── app/
 │   │   ├── main.py                    # FastAPI 入口 + 路由 + 前端挂载
 │   │   ├── services/
-│   │   │   ├── environment.py         # 宿主机环境检测
-│   │   │   ├── models.py              # 模型目录 + 规则推荐引擎
-│   │   │   ├── planner.py             # 参数规划 + 显存估算 + 命令生成
+│   │   │   ├── environment.py         # 宿主机环境检测（NVIDIA / Apple Silicon）
+│   │   │   ├── hardware.py            # HardwareBudget：实测硬件预算（含 UMA）
+│   │   │   ├── estimator.py           # 物理估算：footprint / physics_check / 速度模型
+│   │   │   ├── catalog.py             # 物理画像目录 + select_variant + recommended_entry resolver
+│   │   │   ├── models.py              # 推荐 API 外壳 + 本地 checkpoint 登记
+│   │   │   ├── planner.py             # 由拟合决策推导启动参数（窗口阶梯 / KV 量化 / FA）
 │   │   │   └── deployments.py         # 部署生命周期管理
 │   │   └── runtimes/
 │   │       ├── ollama_runtime.py      # Ollama 适配（OpenAI 兼容 API）
 │   │       ├── transformers_runtime.py # Transformers 适配
 │   │       └── transformers_server.py  # OpenAI 兼容推理服务
 │   ├── tests/
-│   │   └── test_core.py               # 推荐逻辑 + 参数规划单测
-│   └── requirements.txt              # fastapi, uvicorn, pydantic
+│   │   ├── test_core.py               # 环境 / 推荐 API / 参数规划单测
+│   │   └── test_recommendation.py     # resolver 决策表 pin + 不变量
+│   └── requirements.txt              # fastapi, uvicorn, pydantic, httpx
 ├── frontend/
 │   └── index.html                     # 单文件深色工作台 UI
 ├── catalog/
@@ -183,12 +195,37 @@ model-deploy-platform/
   "task": "chat",
   "goal": "balanced",
   "concurrency": 4,
-  "available_vram_gb": 32,
-  "backend": "vllm",
+  "available_vram_gb": null,
+  "backend": "ollama",
   "prefer_quantized": null,
-  "require_local": false
+  "require_local": false,
+  "limit": 20,
+  "live": false
 }
 ```
+
+- `available_vram_gb`：留空时使用实测 `HardwareBudget`（Apple Silicon 走 `sysctl` 统一内存）。
+- `live=true`：用当前空闲内存定价（启动前拟合）；默认 `false` 用总容量减 margin 定价（避免已加载模型把每一行都算成放不下）。
+- `limit`：返回行数上限，默认 20。
+
+推荐响应关键字段：
+
+```json
+{
+  "mode": "resolver",
+  "hardware": {"usable_vram_gb": 19.2, "total_device_gb": 24.0, "uma": true, "source": "sysctl"},
+  "recommendation": {"id": "qwen3-8b", "quantization": "q4_k_m", "zero_spill": true, "reason_key": "speed-gated-quality"},
+  "reason_key": "speed-gated-quality",
+  "reason": "更高质模型未达速度舒适线，已按速度设门后选出最优",
+  "recommendations": [
+    {"id": "qwen3-8b", "recommended": true, "quantization": "q4_k_m", "zero_spill": true, "fits": true, "reason_key": "zero-spill-resident"},
+    {"id": "qwen3-14b", "recommended": false, "quantization": "q4_k_m", "zero_spill": true, "fits": true, "reason_key": "zero-spill-resident"}
+  ],
+  "total_candidates": 24
+}
+```
+
+每一行都带 `reason_key`；溢出的行 `zero_spill=false` 但仍然可见，`fits=false` 的行带 `refusal` 说明物理原因。
 
 ### 参数规划
 
@@ -206,6 +243,19 @@ model-deploy-platform/
 | POST | `/api/deployments/{id}/stop` | 停止部署 |
 | GET | `/api/deployments` | 列出所有部署 |
 | GET | `/api/deployments/{id}` | 获取部署详情 |
+| GET | `/api/deployments/{id}/health` | 对运行中服务做真实健康检查（不是状态位） |
+| POST | `/api/deployments/{id}/test` | 发送真实 OpenAI 兼容 chat completion 并返回回复 |
+
+部署流程（前端「新建部署」→「服务测试」）：
+
+```
+选择 resolver 推荐的模型
+  → POST /api/deployments           创建（ollama 固定 11434，model_path = ollama 标签）
+  → POST /api/deployments/{id}/start 启动（ollama 预加载 / transformers 子进程）
+  → GET  /api/deployments/{id}/health 真实健康检查
+  → POST /api/deployments/{id}/test   真实 /v1/chat/completions
+  → POST /api/deployments/{id}/stop   停止（ollama 卸载模型）
+```
 
 ### 健康检查
 
@@ -222,12 +272,33 @@ model-deploy-platform/
 ```bash
 cd backend
 python -m pip install -r requirements.txt
+
+# 仅本机
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8790
+
+# 局域网可访问
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8790
 ```
 
 ### 打开界面
 
-浏览器访问 `http://127.0.0.1:8790/`
+- 本机：`http://127.0.0.1:8790/`
+- 局域网：`http://<本机IP>:8790/`
+
+查看本机 IP：
+
+```bash
+ipconfig getifaddr en0        # macOS Wi-Fi/有线
+hostname -I                   # Linux
+```
+
+### 局域网访问
+
+- 平台监听 `0.0.0.0`，同一网段的机器可直接打开界面，API 与前端同源。
+- 已启用 CORS（`allow_origins=["*"]`），便于其他客户端直接调用 API。
+- 部署接口返回的 `endpoint` 会按**调用方请求的 Host** 生成，因此局域网客户端看到的是 `http://<本机IP>:<port>/v1`，而不是只有本机能用的 `127.0.0.1`。
+- 推理服务本身也要监听 `0.0.0.0` 才能被局域网调用。Ollama 默认即监听 `*:11434`；若只绑定了回环，用 `OLLAMA_HOST=0.0.0.0 ollama serve` 启动。
+- **安全提示**：这是无鉴权的控制面，能创建/启动/停止进程。只在可信网络暴露，或加反向代理鉴权，不要直接映射到公网。
 
 ### 运行测试
 
@@ -266,19 +337,44 @@ python scripts/smoke_test.py
 | gemma-3-4b-bf16 | Gemma-3-4B | BF16 | — | 10 GB | vLLM, SGLang |
 | phi-4-mini-bf16 | Phi-4-mini | BF16 | — | 9.5 GB | vLLM, SGLang |
 
-### 推荐评分规则
+### 推荐决策（借鉴 Hermes-Agent resolver）
+
+推荐不是一张「显卡 → 模型」的硬编码对照表，而是一个**纯函数 resolver**：
 
 ```
-基础分 = 任务匹配 × 40
+输入：实测 HardwareBudget + 目录中每个模型的物理画像
+输出：该机器该推荐谁 + reason_key
 
-goal=quality:      + 参数量 × 5 + BF16 加成 18
-goal=balanced:     + 4-14B 甜点区加成 24 + BF16 加成 20 + 参数量 × 2
-goal=low-memory:   + AWQ/GPTQ 加成 24 / FP8 加成 8 + 参数量 × 5
-goal=throughput:   + FP8 加成 28 / AWQ/GPTQ 加成 18 + 并发加成
-
-本地就绪:           + 30
-显存硬约束:          超过安全预算(85%) → 排除，不降分
+候选 = physics_check 通过的条目
+  否 → 不参与自动推荐，仅保留可见 + 可解释（spill-visible / physics-refused）
+  是 → zero_spill ？weights + 64K KV + 运行时开销 全进设备内存
+        否 → 不参与自动推荐，仅可显式选择
+        是 → predicted_decode_tok_s >= 20 ？
+              是 → 在合格池里取 max(quality, -size)
+                    存在 quality 更高但被速度淘汰的条目 → speed-gated-quality
+                    否则 → best-quality-resident
+              否 → 取驻留中最快的 → fastest-resident
 ```
+
+三条硬规矩：
+
+1. **只有完全驻留（zero-spill）才自动推荐**；会溢出的模型仍然渲染那一行并解释原因，但必须由用户显式选择。
+2. **唯一硬拒绝是物理**：weights + 64K 上下文 + 运行时开销超过 VRAM+RAM 才拒绝；补救永远是「换更小的量化」，不是「砍上下文」。64K 是承诺，144K 是目标。
+3. **速度只用于排序和设门**，不是展示值。速度是纯内存带宽模型：
+   `tok/s ≈ 带宽 / (构建体积 × decode_fraction)`，带宽用类别常数（离散卡 1000 GB/s、统一内存 210 GB/s、溢出 80 GB/s），MoE 的 `decode_fraction` 刻画「每 token 只读活跃专家」。
+
+`reason_key` 枚举：`best-quality-resident` / `speed-gated-quality` / `fastest-resident` / `no-recommendation`，以及逐行的 `zero-spill-resident` / `spill-visible` / `physics-refused` / `backend-incompatible`。前端只渲染 resolver 真正命中的那个分支，不重新推导。
+
+### 决策表（`tests/test_recommendation.py` 像 golden file 一样 pin 住）
+
+| 预算 | 离散卡（vllm/sglang） | 统一内存 UMA（ollama/llama.cpp） |
+|---:|---|---|
+| 16 GB | 更小的量化可驻留则推荐，否则无推荐 | 小模型驻留；8B q8_0 低于舒适线 → 降精度到 q4_k_m |
+| 24 GB | 30B-A3B AWQ 驻留且快 | Qwen3-8B q4_k_m · speed-gated-quality |
+| 32–128 GB | 稀疏 MoE 胜出 | 稀疏 MoE 胜出（dense 14B/32B 在 210 GB/s 下低于舒适线） |
+| 512 GB | dense 32B 仍被速度设门，MoE 胜出 | 同上 |
+
+这张表就是 resolver 存在的理由：**统一内存 24–128 GB 这一列**——dense 14B 在 210 GB/s 下预测约 13.7 tok/s，低于 20 的舒适线，所以稀疏 30B-A3B 或更小的 q4_k_m 胜出。
 
 ---
 
