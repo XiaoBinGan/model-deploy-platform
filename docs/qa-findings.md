@@ -14,6 +14,31 @@
 
 基线：pytest 31 passed；node smoke.js 12/12；node smoke.js --ollama qwen3:8b 16/16。
 
+## 修复状态
+
+已修 9 条（含 5 条严重），提交 9375c19。
+
+| 编号 | 严重程度 | 修复方式 | 回归测试 |
+|---|---|---|---|
+| F-01 | 严重 | esc() 补 > " ' 转义；下拉改用索引 + DEPLOY_MODELS，不再把 JSON 塞进属性 | smoke: esc 转义 / 下拉守卫 |
+| B-02 | 严重 | 部署 ID 改用 uuid4 | test_deployment_ids_are_unique_within_the_same_second |
+| B-03 | 严重 | command_string 改用 shlex.join | test_command_string_escapes_model_path |
+| DESK-02 | 严重 | start() 拦 STARTING，重复启动幂等 | 假 llama-server 验证（procs.size==1） |
+| DESK-03 | 严重 | 健康检查超时后真的 kill 进程 | _kill 单元验证 |
+| DESK-04 | 严重 | stop() SIGTERM 后宽限期到就 SIGKILL，确认死亡才报 STOPPED | 假 llama-server 忽略 SIGTERM 验证 |
+| DESK-05 | 严重 | ollama pull 注册进 procs 并加 30 分钟超时 | 代码审查 |
+| DESK-06 | 严重 | 世代计数让 stop 后的旧启动结果无法翻回 RUNNING | 世代过期验证 |
+| DESK-08 | 一般 | 新增 stopAll()，接进 server.close 与 before-quit | 假 llama-server 验证 |
+
+**未修（需要先定设计）**：B-01、B-04、DESK-01、B-12、DESK-16 这组信任边界问题。
+核心待定问题是「控制面到底是不是本机专属」：如果是，就绑死 127.0.0.1、
+关掉 CORS 通配、加本机 token；如果要局域网共享，就得引入认证。
+这决定了桌面端该不该白名单校验控制面返回的 command[0]。
+
+**已记录但未修**：B-08（plan_window 对 native 小于 64K 的模型返回 64K）
+在 backend/tests/test_qa_regressions.py 里标记为 xfail strict，
+修好之后会变成 XPASS 失败，提醒删掉标记。
+
 ## 一、11 条严重问题
 
 | 编号 | 标题 | 位置 |
