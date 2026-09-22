@@ -4,12 +4,14 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { probe } = require("./probe");
+const { Deployments } = require("./deploy");
 
 const SERVICE = (process.env.MDP_SERVICE || "http://127.0.0.1:8790").replace(/[/]+$/, "");
 const FRONTEND = path.join(__dirname, "..", "frontend", "index.html");
 
 let cached = null;
 let cachedAt = 0;
+let deploys = null;
 
 async function probeCached() {
   if (cached && Date.now() - cachedAt < 10000) return cached;
@@ -34,6 +36,12 @@ function readBody(req) {
   });
 }
 
+async function jsonBody(req) {
+  const raw = await readBody(req);
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
 async function forward(req, res, body) {
   const init = {
     method: req.method,
@@ -50,6 +58,7 @@ async function forward(req, res, body) {
 
 async function handle(req, res) {
   const url = new URL(req.url, "http://127.0.0.1");
+  const parts = url.pathname.split("/").filter(Boolean);
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     try {
@@ -60,7 +69,7 @@ async function handle(req, res) {
   }
 
   if (url.pathname === "/api/health") {
-    return send(res, 200, JSON.stringify({ status: "ok", mode: "desktop", service: SERVICE, version: "0.1.0" }));
+    return send(res, 200, JSON.stringify({ status: "ok", mode: "desktop", service: SERVICE, version: "0.2.0" }));
   }
 
   if (url.pathname === "/api/hardware/self") {
@@ -71,11 +80,64 @@ async function handle(req, res) {
     })));
   }
 
-  if (url.pathname === "/api/models/recommend" && req.method === "POST") {
-    const raw = await readBody(req);
+  if (url.pathname === "/api/backends") {
+    return send(res, 200, JSON.stringify(await deploys.detectBackends()));
+  }
+
+  // --- deployments run HERE, on the user machine, not on the control plane ---
+  if (parts[0] === "api" && parts[1] === "deployments") {
+    const id = parts[2];
+    const action = parts[3];
+    try {
+      if (!id && req.method === "GET") {
+        return send(res, 200, JSON.stringify({ deployments: deploys.list() }));
+      }
+      if (!id && req.method === "POST") {
+        const body = await jsonBody(req);
+        body.hardware = await probeCached();
+        return send(res, 200, JSON.stringify(deploys.create(body)));
+      }
+      if (id && !action && req.method === "GET") {
+        return send(res, 200, JSON.stringify(deploys.get(id)));
+      }
+      if (id && action === "start" && req.method === "POST") {
+        return send(res, 200, JSON.stringify(deploys.start(id)));
+      }
+      if (id && action === "stop" && req.method === "POST") {
+        return send(res, 200, JSON.stringify(await deploys.stop(id)));
+      }
+      if (id && action === "health" && req.method === "GET") {
+        return send(res, 200, JSON.stringify(await deploys.health(id)));
+      }
+      if (id && action === "test" && req.method === "POST") {
+        const body = await jsonBody(req);
+        return send(res, 200, JSON.stringify(
+          await deploys.test(id, body.message, body.model_name, body.max_tokens)
+        ));
+      }
+      return send(res, 404, JSON.stringify({ detail: "unknown deployment route" }));
+    } catch (e) {
+      return send(res, 400, JSON.stringify({ detail: String((e && e.message) || e) }));
+    }
+  }
+
+  // --- size the plan for THIS machine, never for the control plane ---
+  if (url.pathname === "/api/plans/preview" && req.method === "POST") {
     let payload;
     try {
-      payload = JSON.parse(raw || "{}");
+      payload = await jsonBody(req);
+    } catch (e) {
+      return send(res, 400, JSON.stringify({ detail: "请求体不是合法 JSON" }));
+    }
+    if (!payload.hardware) payload.hardware = await probeCached();
+    payload.client_is_local = true;
+    return forward(req, res, JSON.stringify(payload));
+  }
+
+  if (url.pathname === "/api/models/recommend" && req.method === "POST") {
+    let payload;
+    try {
+      payload = await jsonBody(req);
     } catch (e) {
       return send(res, 400, JSON.stringify({ detail: "请求体不是合法 JSON" }));
     }
@@ -92,7 +154,10 @@ async function handle(req, res) {
   send(res, 404, JSON.stringify({ detail: "not found" }));
 }
 
-function start(port) {
+function start(port, options) {
+  const opts = options || {};
+  const dataDir = opts.dataDir || path.join(__dirname, ".mdp-data");
+  deploys = new Deployments(dataDir, SERVICE);
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       handle(req, res).catch((e) => send(res, 500, JSON.stringify({ detail: String((e && e.message) || e) })));
@@ -102,6 +167,7 @@ function start(port) {
       resolve({
         url: "http://127.0.0.1:" + addr.port + "/",
         port: addr.port,
+        dataDir,
         close: () => server.close(),
       });
     });

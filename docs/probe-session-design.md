@@ -599,8 +599,25 @@ npm start
 MDP_SERVICE=http://100.100.182.242:8790 npm start
 ```
 
-**尚未实现**：本地部署。`/api/deployments` 目前仍转发给控制面，
-所以部署仍发生在控制面所在机器。要真正部署到本机，需在主进程 spawn
-`ollama` / `llama-server`（约 100 行），这是 E1 的剩余部分。
+**本地部署已实现**（`desktop/deploy.js`）：`/api/deployments` 不再转发，
+部署真正发生在用户本机。
+
+| 后端 | 行为 |
+|---|---|
+| ollama | 缺模型先 `ollama pull`，再 `keep_alive` 常驻；停止时 `keep_alive: 0` 卸载 |
+| llama.cpp | 带本机硬件向控制面要规划，spawn `llama-server`，轮询 `/health` |
+| vLLM / SGLang | 明确 `BLOCKED`（面向 Linux 服务器） |
+
+顺带修了一个真实缺陷：`planner.preview` 原本用 `probe_budget()`，
+即**按服务器硬件规划**。共享服务下远端用户拿到的窗口与量化是按服务器算的。
+现在 `PlanRequest` 接受 `hardware`，`hardware_source` 随响应返回；
+桌面端在转发 `/api/plans/preview` 前注入本机档案。
+
+验证（`desktop/smoke.js`，16 项全过）：
+
+- 显式塞一个 RTX 3060 12GB 档案 -> 规划出 `usable=10GB`，证明跟随客户端
+- 不传档案 -> `client:agent` / `usable=19.2GB`（本机 Apple M5）
+- llama.cpp 指向不存在的 .gguf -> `FAILED` 且日志说明原因
+- 真机 `qwen3:8b`：create -> start -> `RUNNING` -> health 200 -> chat -> stop 卸载
 
 

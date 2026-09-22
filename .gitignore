@@ -10,4 +10,5 @@ desktop/node_modules/
 desktop/.npm-cache/
 desktop/.electron-cache/
 desktop/.electron-data/
+desktop/.mdp-data/
 desktop/dist/

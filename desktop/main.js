@@ -7,7 +7,8 @@ let win = null;
 let local = null;
 
 async function createWindow() {
-  local = await start();
+  // Deployments and their logs live in the app data directory, not the repo.
+  local = await start(0, { dataDir: app.getPath("userData") });
   win = new BrowserWindow({
     width: 1360,
     height: 920,

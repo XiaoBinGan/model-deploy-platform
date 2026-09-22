@@ -129,3 +129,33 @@ def test_recommend_uses_client_profile_not_server():
     for row in out["recommendations"]:
         if row["zero_spill"]:
             assert row["memory_gb"] < 8.0
+
+def test_planner_sizes_for_client_profile_not_server():
+    """A shared service must not plan against its own GPU.
+
+    The RTX 3060 profile below is deliberately not this host, so the budget and
+    window can only have come from the client profile.
+    """
+    from app.services import planner
+
+    out = planner.preview(planner.PlanRequest(
+        model_id="qwen3-8b",
+        backend="llama.cpp",
+        port=8080,
+        hardware={"source": "browser", "platform": "win32", "ram_gb": 32,
+                  "gpus": [{"name": "NVIDIA GeForce RTX 3060", "vendor": "nvidia",
+                            "vram_gb": 12, "uma": False}]},
+    ))
+    assert out["hardware_source"] == "client:browser"
+    assert out["hardware"]["uma"] is False
+    assert 9.5 < out["hardware"]["usable_vram_gb"] < 10.5
+    assert out["command"][0] == "llama-server"
+    assert out["decision"]["planned_window"] >= 64 * 1024
+
+
+def test_planner_uses_server_probe_without_profile():
+    from app.services import planner
+
+    out = planner.preview(planner.PlanRequest(model_id="qwen3-8b", backend="llama.cpp", port=8080))
+    assert out["hardware_source"] == "server"
+

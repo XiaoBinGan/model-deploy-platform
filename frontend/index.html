@@ -414,7 +414,7 @@ async function refreshAdvisory(){
     try{
       var d=await (await fetch('/api/plans/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
         model_id:m?m.id:'custom',model_path:document.getElementById('d-path').value,
-        backend:document.getElementById('d-backend').value,port:+document.getElementById('d-port').value})})).json();
+        backend:document.getElementById('d-backend').value,port:+document.getElementById('d-port').value,hardware:PROFILE})})).json();
       document.getElementById('advisory-cmd').textContent=d.command_string;
     }catch(e){}
   } else {
@@ -444,6 +444,8 @@ async function refreshDeployments(){
     html+='<td><button class="mini" onclick="depStart(\''+d.id+'\')">启动</button> <button class="mini" onclick="depStop(\''+d.id+'\')">停止</button> <button class="mini" onclick="depLogs(\''+d.id+'\')">日志</button></td></tr>';
   });
   document.getElementById('d-list').innerHTML=DEPLOYMENTS.length?html+'</tbody></table>':'暂无部署';
+  clearTimeout(window.__depPoll);
+  if(DEPLOYMENTS.some(function(d){return d.status==='STARTING';})){window.__depPoll=setTimeout(refreshDeployments,3000);}
   var tsel=document.getElementById('t-dep');
   tsel.innerHTML=DEPLOYMENTS.map(function(d){return '<option value="'+esc(d.id)+'" data-model="'+esc(d.model_path)+'">'+esc(d.id)+' · '+esc(d.model_path)+' · '+esc(d.status)+'</option>';}).join('');
   onTestDepChange();

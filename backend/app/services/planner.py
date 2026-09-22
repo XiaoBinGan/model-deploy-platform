@@ -9,7 +9,7 @@ the UI can show it and presets can record it.
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from .hardware import probe_budget, GIB
+from .hardware import probe_budget, budget_from_profile, GIB
 from .catalog import CATALOG
 from .estimator import (
     plan_window, resident_bytes, predicted_decode_tok_s,
@@ -35,6 +35,9 @@ class PlanRequest(BaseModel):
     max_num_seqs: int = 8
     gpu_memory_utilization: float = Field(.9, ge=.5, le=.99)
     kv_quant: str = "q8_0"
+    # A shared service must size the plan for the *client* machine. Passing a
+    # profile switches the budget source; omitting it keeps the server probe.
+    hardware: dict | None = None
 
 
 def _entry(model_id):
@@ -61,7 +64,13 @@ def _estimate(entry, variant, window, kv_quant):
 
 @router.post("/plans/preview")
 def preview(req: PlanRequest):
-    budget = probe_budget(planning=True)
+    if req.hardware:
+        profile_result = budget_from_profile(req.hardware)
+        budget = profile_result.budget
+        hardware_source = profile_result.source
+    else:
+        budget = probe_budget(planning=True)
+        hardware_source = "server"
     warnings = []
     status = "PASS"
     decision = {
@@ -152,4 +161,5 @@ def preview(req: PlanRequest):
         "command_string": " ".join(cmd),
         "decision": decision,
         "hardware": budget.to_dict(),
+        "hardware_source": hardware_source,
     }
