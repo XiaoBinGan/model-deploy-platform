@@ -1,0 +1,13 @@
+{
+  "name": "mdp-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Model Deploy Platform 桌面端：本地硬件探测 + 本地部署",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

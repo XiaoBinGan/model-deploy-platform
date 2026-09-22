@@ -5,3 +5,9 @@ data/platform.db
 data/logs/
 frontend/node_modules/
 frontend/dist/
+backend/.venv/
+desktop/node_modules/
+desktop/.npm-cache/
+desktop/.electron-cache/
+desktop/.electron-data/
+desktop/dist/
