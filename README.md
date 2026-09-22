@@ -200,9 +200,50 @@ model-deploy-platform/
   "prefer_quantized": null,
   "require_local": false,
   "limit": 20,
-  "live": false
+  "live": false,
+  "hardware": {
+    "source": "browser",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "cpu_cores": 10,
+    "ram_gb": 24,
+    "gpus": [{"name": "Apple M4 Pro", "vendor": "apple", "vram_gb": null, "uma": true}]
+  }
 }
 ```
+
+### 客户端硬件（共享服务）
+
+共享服务下服务端探测到的是**服务器**硬件，不是用户的机器。因此硬件档案作为**请求参数**传入，
+resolver 仍然只吃一个 `HardwareBudget`：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/hardware/self` | 服务器自身档案（显式标注 source=server） |
+| GET | `/api/hardware/gpus` | GPU 型号 → 显存 / UMA 查表（浏览器读不到显存） |
+| POST | `/api/hardware/resolve` | 校验并钳制客户端档案 → budget + warnings |
+| POST | `/api/hardware/parse` | 解析档案码或粘贴的 JSON |
+| POST | `/api/hardware/profile-code` | 把档案编码成可粘贴的档案码 |
+| GET | `/api/hardware/probe.py` | 本机精确探测脚本（只读，打印 JSON） |
+| GET | `/api/hardware/probe-command` | 按请求 base URL 生成一行探测命令 |
+
+推荐响应新增字段：`client_is_local`、`hardware_source`、`hardware_trusted`、
+`hardware_warnings`、`normalized_profile`。
+
+**远端部署守卫**：非本机请求创建部署默认返回 403（模型会落到服务器而不是用户机器）。
+如需放开（单租户可信机器）设置 `MDP_ALLOW_REMOTE_DEPLOY=1`。
+同机通过局域网 IP 访问仍视为本机。
+
+### 浏览器探测的边界
+
+浏览器**读不到显存**，`deviceMemory` 只有粗档位且封顶 8GB、Safari/Firefox 不支持。
+所以：
+
+1. 显存由 **GPU 型号查表**得到，并标记为不可信；
+2. Apple Silicon 的统一内存需要**用户确认内存档位**；
+3. 精确检测靠本机执行 `probe.py` 后把 JSON 或档案码粘回页面。
+
+详见 `docs/client-hardware-detection.md`。
 
 - `available_vram_gb`：留空时使用实测 `HardwareBudget`（Apple Silicon 走 `sysctl` 统一内存）。
 - `live=true`：用当前空闲内存定价（启动前拟合）；默认 `false` 用总容量减 margin 定价（避免已加载模型把每一行都算成放不下）。

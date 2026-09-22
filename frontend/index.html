@@ -10,6 +10,7 @@
 button{border:1px solid var(--border);background:var(--raised);color:var(--text);padding:9px 13px;border-radius:8px;cursor:pointer}
 button.primary{background:var(--primary);color:#0b0d10;border:0;font-weight:700}
 button.mini{padding:6px 10px;font-size:12px}
+button:disabled{opacity:.45;cursor:not-allowed}
 .app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
 .side{padding:25px 16px;border-right:1px solid var(--border);background:#0d1014}
 .brand{font-size:18px;font-weight:800;margin:0 10px 32px}.brand span{color:var(--primary)}
@@ -23,6 +24,9 @@ main{max-width:1440px;width:100%;padding:28px 38px;margin:auto}
 .card{background:rgba(18,22,27,.88);border:1px solid var(--border);border-radius:12px;padding:18px}
 .metric{font-size:22px;font-weight:750;margin-top:10px}.muted{color:var(--muted)}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--danger)}
+.banner{border-radius:10px;padding:12px 16px;margin-bottom:18px;border:1px solid var(--border);background:#141a22}
+.banner.remote{background:#2a2110;border-color:#5c4718}
+.banner.local{background:#10251b;border-color:#1f4a34}
 .layout{display:grid;grid-template-columns:1.4fr .9fr;gap:16px;margin-top:16px}
 .section-title{font-size:16px;font-weight:700;margin-bottom:14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -35,34 +39,37 @@ tr.spill{opacity:.62}
 .wizard{display:none}.wizard.show{display:block}
 .field{margin:12px 0}.field label{display:block;color:var(--muted);margin-bottom:6px}
 .field input,.field select,.field textarea{width:100%;padding:10px;background:#0c1014;border:1px solid var(--border);border-radius:7px;color:var(--text)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--border);padding:14px;border-radius:8px;color:#b9c2ff;font-size:12px;word-break:break-all}
 .reason{display:inline-block;margin-top:8px;padding:5px 9px;border-radius:6px;background:#1d2340;color:#c7cdfd;font-size:12px}
 .reply{background:#0f1a14;border:1px solid #1f3b2c;border-radius:8px;padding:12px;margin-top:10px;white-space:pre-wrap}
-@media(max-width:900px){.app{grid-template-columns:1fr}.side{display:none}main{padding:20px}.grid,.layout{grid-template-columns:1fr}}
+@media(max-width:900px){.app{grid-template-columns:1fr}.side{display:none}main{padding:20px}.grid,.layout,.row{grid-template-columns:1fr}}
 </style></head>
 <body><div class="app">
 <aside class="side"><div class="brand">Model<span>Forge</span></div><nav>
 <button class="active" onclick="show('home',this)">部署首页</button>
 <button onclick="show('models',this)">模型推荐</button>
+<button onclick="show('profile',this)">硬件档案</button>
 <button onclick="show('env',this)">环境检测</button>
 <button onclick="show('deploy',this)">新建部署</button>
 <button onclick="show('service',this)">服务测试</button>
 </nav></aside>
 <main>
 <section id="home" class="wizard show">
-  <div class="top"><div><div class="eyebrow">Inference control plane</div><h1 class="title">让推荐从实测硬件推导，而不是硬编码</h1>
-  <div class="sub">唯一硬拒绝是物理放不下；其余全部可见、可解释、需显式选择。</div></div>
-  <button class="primary" onclick="refresh()">重新扫描</button></div>
+  <div id="banner" class="banner">正在检测运行位置…</div>
+  <div class="top"><div><div class="eyebrow">Inference control plane</div><h1 class="title">按你自己的机器推荐模型</h1>
+  <div class="sub">共享服务只负责检索；模型在你本机执行。</div></div>
+  <button class="primary" onclick="refresh()">重新检测</button></div>
   <div class="grid">
-    <div class="card"><div class="muted">设备</div><div class="metric" id="hw-device">检测中…</div><div class="muted" id="hw-type"></div></div>
+    <div class="card"><div class="muted">设备</div><div class="metric" id="hw-device">—</div><div class="muted" id="hw-type"></div></div>
     <div class="card"><div class="muted">可用预算</div><div class="metric" id="hw-budget">—</div><div class="muted" id="hw-total"></div></div>
-    <div class="card"><div class="muted">系统内存可用</div><div class="metric" id="hw-ram">—</div><div class="muted">UMA 与系统内存共享</div></div>
+    <div class="card"><div class="muted">硬件来源</div><div class="metric" id="hw-source">—</div><div class="muted" id="hw-trust"></div></div>
     <div class="card"><div class="muted">运行服务</div><div class="metric" id="hw-running">0</div><div class="muted">当前部署实例</div></div>
   </div>
   <div class="layout">
     <div class="card"><div class="section-title">自动推荐</div><div id="pick">加载中…</div>
       <div style="margin-top:14px"><button class="primary" onclick="usePick()">用这个模型去部署</button></div></div>
-    <div class="card"><div class="section-title">硬件预算</div><div class="log" id="budget-log">—</div></div>
+    <div class="card"><div class="section-title">预算与警告</div><div class="log" id="budget-log">—</div></div>
   </div>
 </section>
 <section id="models" class="wizard">
@@ -72,16 +79,54 @@ pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--border);paddi
   <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option><option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option></select></div></div>
   <div class="card"><div id="rows">加载中…</div></div>
 </section>
+<section id="profile" class="wizard">
+  <div class="top"><div><div class="eyebrow">Your machine</div><h1 class="title">硬件档案</h1>
+  <div class="sub">浏览器读不到显存，内存档位也被封顶，所以检测值一律可编辑。</div></div>
+  <button class="primary" onclick="runBrowserProbe()">重新检测本机</button></div>
+  <div class="layout">
+    <div class="card"><div class="section-title">档案</div>
+      <div class="row">
+        <div class="field"><label>平台</label><select id="pf-platform"><option value="darwin">darwin</option><option value="win32">win32</option><option value="linux">linux</option><option value="unknown">unknown</option></select></div>
+        <div class="field"><label>架构</label><input id="pf-arch" placeholder="arm64 / x86_64"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>CPU 核数</label><input id="pf-cores" type="number" min="1" max="1024"></div>
+        <div class="field"><label>内存 (GB)</label><input id="pf-ram" type="number" step="0.5" min="0.5" max="4096"></div>
+      </div>
+      <div class="field"><label>GPU 名称</label><input id="pf-gpu" placeholder="Apple M4 Pro / NVIDIA GeForce RTX 4090"></div>
+      <div class="row">
+        <div class="field"><label>显存 (GB，统一内存留空)</label><input id="pf-vram" type="number" step="0.5" min="0.5" max="4096"></div>
+        <div class="field"><label>统一内存 (UMA)</label><select id="pf-uma"><option value="true">是</option><option value="false">否</option></select></div>
+      </div>
+      <button class="primary" onclick="applyProfileForm()">应用并重新推荐</button>
+      <div style="margin-top:10px"><button class="mini" onclick="copyCode()">生成档案码</button></div>
+      <div class="field"><label>档案码 / 粘贴的 JSON</label><textarea id="pf-code" rows="3" placeholder="mdp1.xxxx.yyyy 或 {\"ram_gb\":24,...}"></textarea></div>
+      <button class="mini" onclick="parseCode()">解析粘贴内容</button>
+    </div>
+    <div class="card"><div class="section-title">归一化结果</div><div id="pf-out" class="log">—</div>
+      <div class="section-title" style="margin-top:16px">本机精确探测</div>
+      <pre id="pf-cmd">—</pre>
+      <div style="margin-top:10px"><button class="mini" onclick="copyProbe()">复制探测命令</button></div>
+      <div class="muted" style="margin-top:8px">在你自己的机器上执行，把输出的 JSON 粘回左侧。</div>
+    </div>
+  </div>
+</section>
 <section id="env" class="wizard">
   <div class="top"><div><div class="eyebrow">Environment diagnostics</div><h1 class="title">宿主机环境</h1>
-  <div class="sub">GPU、统一内存、运行时与平台能力。</div></div><button class="primary" onclick="refresh()">重新扫描</button></div>
+  <div class="sub">这是**服务器**的环境，不代表你的机器。</div></div><button class="primary" onclick="refresh()">重新扫描</button></div>
   <div class="card"><div class="section-title">检测项目</div><div class="log" id="checks">—</div></div>
   <div class="card" style="margin-top:16px"><div class="section-title">原始报告</div><pre id="raw-env">—</pre></div>
 </section>
 <section id="deploy" class="wizard">
   <div class="top"><div><div class="eyebrow">Deployment wizard</div><h1 class="title">新建部署</h1>
-  <div class="sub">创建 → 启动 → 健康检查 → OpenAI 兼容接口。</div></div>
-  <button class="primary" onclick="createDeploy()">创建并启动</button></div>
+  <div class="sub" id="deploy-sub">创建 → 启动 → 健康检查 → OpenAI 兼容接口。</div></div>
+  <button class="primary" id="deploy-btn" onclick="createDeploy()">创建并启动</button></div>
+  <div id="deploy-advisory" class="card" style="display:none">
+    <div class="section-title">共享服务 · 仅检索</div>
+    <div class="muted">服务端不能把模型部署到你的机器上。请在本机执行下面的命令：</div>
+    <pre id="advisory-cmd" style="margin-top:10px">—</pre>
+    <div style="margin-top:10px"><button class="mini" onclick="copyAdvisory()">复制命令</button></div>
+  </div>
   <div class="layout">
     <div class="card"><div class="section-title">部署配置</div>
       <div class="field"><label>模型（来自 resolver）</label><select id="d-model" onchange="syncDeploy()"></select></div>
@@ -114,7 +159,7 @@ pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--border);paddi
 </main></div>
 <script>
 function show(id,el){
-  ['home','models','env','deploy','service'].forEach(function(x){document.getElementById(x).classList.toggle('wizard',x!==id);});
+  ['home','models','profile','env','deploy','service'].forEach(function(x){document.getElementById(x).classList.toggle('wizard',x!==id);});
   document.getElementById(id).classList.remove('wizard');
   if(el){document.querySelectorAll('nav button').forEach(function(b){b.classList.remove('active')});el.classList.add('active');}
   if(id==='deploy'||id==='service'){refreshDeployments();}
@@ -122,17 +167,123 @@ function show(id,el){
 function fmt(gb){return (gb===null||gb===undefined)?'—':gb+' GB';}
 function esc(s){return String(s===undefined||s===null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
 function badge(t,cls){return '<span class="tag '+(cls||'')+'">'+esc(t)+'</span>';}
-var LAST=null, DEPLOYMENTS=[];
+function copyText(text){
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text);return;}
+  var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+}
+var LAST=null, DEPLOYMENTS=[], CONFIG={}, PROFILE={source:'browser',platform:'unknown',architecture:'',cpu_cores:null,ram_gb:null,gpus:[]}, GPU_TABLE=null;
+
+function detectGPUName(){
+  try{
+    var c=document.createElement('canvas');
+    var gl=c.getContext('webgl')||c.getContext('experimental-webgl');
+    if(!gl){return '';}
+    var ext=gl.getExtension('WEBGL_debug_renderer_info');
+    if(ext){return gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)||'';}
+    return gl.getParameter(gl.RENDERER)||'';
+  }catch(e){return '';}
+}
+async function resolveGPU(name){
+  if(!GPU_TABLE){try{GPU_TABLE=await (await fetch('/api/hardware/gpus')).json();}catch(e){GPU_TABLE={gpus:[]};}}
+  var n=(name||'').toLowerCase();
+  var list=GPU_TABLE.gpus||[];
+  for(var i=0;i<list.length;i++){if(n.indexOf(list[i].key)>=0){return list[i];}}
+  return null;
+}
+async function runBrowserProbe(){
+  var ua=navigator.userAgent||'';
+  var p={source:'browser',platform:'unknown',architecture:'',cpu_cores:navigator.hardwareConcurrency||null,ram_gb:(navigator.deviceMemory||null),gpus:[]};
+  if(/Mac OS X|Macintosh/.test(ua)){p.platform='darwin';}
+  else if(/Windows/.test(ua)){p.platform='win32';}
+  else if(/Linux/.test(ua)){p.platform='linux';}
+  if(navigator.userAgentData&&navigator.userAgentData.getHighEntropyValues){
+    try{
+      var h=await navigator.userAgentData.getHighEntropyValues(['architecture','bitness']);
+      if(h.architecture){p.architecture=h.architecture+(h.bitness==='64'?'64':'');}
+    }catch(e){}
+  }
+  var gpuName=detectGPUName();
+  if(gpuName){
+    var info=await resolveGPU(gpuName);
+    p.gpus.push({name:gpuName,vendor:(info&&info.vendor)||'unknown',vram_gb:(info&&info.vram_gb)||null,uma:!!(info&&info.uma)});
+  }
+  PROFILE=p;
+  fillProfileForm();
+  await resolveProfile();
+}
+function fillProfileForm(){
+  document.getElementById('pf-platform').value=PROFILE.platform||'unknown';
+  document.getElementById('pf-arch').value=PROFILE.architecture||'';
+  document.getElementById('pf-cores').value=PROFILE.cpu_cores||'';
+  document.getElementById('pf-ram').value=PROFILE.ram_gb||'';
+  var g=(PROFILE.gpus&&PROFILE.gpus[0])||null;
+  document.getElementById('pf-gpu').value=g?g.name:'';
+  document.getElementById('pf-vram').value=(g&&g.vram_gb)?g.vram_gb:'';
+  document.getElementById('pf-uma').value=(g&&g.uma)?'true':'false';
+}
+function applyProfileForm(){
+  var gpu=document.getElementById('pf-gpu').value.trim();
+  var vram=document.getElementById('pf-vram').value;
+  var uma=document.getElementById('pf-uma').value==='true';
+  PROFILE={
+    source:'manual',
+    platform:document.getElementById('pf-platform').value,
+    architecture:document.getElementById('pf-arch').value.trim(),
+    cpu_cores:+document.getElementById('pf-cores').value||null,
+    ram_gb:+document.getElementById('pf-ram').value||null,
+    gpus:gpu?[{name:gpu,vendor:'unknown',vram_gb:vram?+vram:null,uma:uma}]:[]
+  };
+  resolveProfile();
+}
+async function resolveProfile(){
+  try{
+    var d=await (await fetch('/api/hardware/resolve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hardware:PROFILE})})).json();
+    var b=d.budget||{};
+    document.getElementById('pf-out').textContent=
+      'source: '+d.source+'\ntrusted: '+d.trusted+'\numa: '+b.uma+
+      '\nusable_vram_gb: '+b.usable_vram_gb+'\ntotal_device_gb: '+b.total_device_gb+
+      '\ndevice: '+b.device_name+
+      ((d.warnings&&d.warnings.length)?'\n\n警告:\n- '+d.warnings.join('\n- '):'');
+  }catch(e){document.getElementById('pf-out').textContent='解析失败：'+e;}
+  refresh();
+}
+async function copyCode(){
+  try{
+    var d=await (await fetch('/api/hardware/profile-code',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({profile:PROFILE})})).json();
+    document.getElementById('pf-code').value=d.code;
+    copyText(d.code);
+  }catch(e){}
+}
+async function parseCode(){
+  var text=document.getElementById('pf-code').value.trim();
+  if(!text){return;}
+  try{
+    var r=await fetch('/api/hardware/parse',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})});
+    var d=await r.json();
+    if(!r.ok){document.getElementById('pf-out').textContent='解析失败：'+(d.detail||r.status);return;}
+    PROFILE=d.profile;
+    fillProfileForm();
+    await resolveProfile();
+  }catch(e){document.getElementById('pf-out').textContent='解析失败：'+e;}
+}
+async function loadProbeCommand(){
+  try{
+    var d=await (await fetch('/api/hardware/probe-command')).json();
+    document.getElementById('pf-cmd').textContent=d.command;
+  }catch(e){}
+}
+function copyProbe(){copyText(document.getElementById('pf-cmd').textContent);}
+
 async function refresh(){
   var backend=document.getElementById('backend').value||'ollama';
   var env,rec;
   try{env=await (await fetch('/api/environment/latest')).json();}catch(e){env=null;}
-  try{rec=await (await fetch('/api/models/recommend',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({task:'chat',goal:'balanced',backend:backend,limit:40})})).json();}catch(e){rec=null;}
+  try{
+    rec=await (await fetch('/api/models/recommend',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({task:'chat',goal:'balanced',backend:backend,limit:40,hardware:PROFILE})})).json();
+  }catch(e){rec=null;}
   LAST=rec;
   if(env){
     var g=(env.gpu&&env.gpu[0])||null;
-    document.getElementById('hw-device').textContent=g?g.name:'未检测到';
-    document.getElementById('hw-type').textContent=(env.apple_silicon?'Apple Silicon · 统一内存':'独立显卡')+' · '+esc(env.architecture||'');
     document.getElementById('checks').innerHTML=(env.checks||[]).map(function(c){
       var mark=c.status==='PASS'?'[PASS] ':c.status==='NOT_APPLICABLE'?'[N/A]  ':'[WARN] ';
       return esc(mark+c.name+'  '+c.message);}).join('<br>');
@@ -140,19 +291,36 @@ async function refresh(){
   }
   if(rec){
     var h=rec.hardware||{};
+    document.getElementById('hw-device').textContent=h.device_name||'—';
+    document.getElementById('hw-type').textContent=(h.uma?'统一内存':'独立显存')+' · '+(rec.normalized_profile&&rec.normalized_profile.architecture||'');
     document.getElementById('hw-budget').textContent=fmt(h.usable_vram_gb);
-    document.getElementById('hw-total').textContent='总容量 '+(h.uma?'统一内存 ':'显存 ')+fmt(h.total_device_gb);
-    document.getElementById('hw-ram').textContent=fmt(h.ram_available_gb);
+    document.getElementById('hw-total').textContent='总容量 '+fmt(h.total_device_gb);
+    document.getElementById('hw-source').textContent=(rec.hardware_source||'—');
+    document.getElementById('hw-trust').textContent=rec.hardware_trusted?'服务器实测':'客户端提交，需确认';
+    var warn=(rec.hardware_warnings||[]);
     document.getElementById('budget-log').textContent=
-      'source: '+h.source+'\nusable_vram_gb: '+h.usable_vram_gb+'\ntotal_device_gb: '+h.total_device_gb+
-      '\nram_available_gb: '+h.ram_available_gb+'\numa: '+h.uma+
-      '\ncomfort_decode_tok_s: '+rec.comfort_decode_tok_s+'\ntotal_candidates: '+rec.total_candidates;
+      'source: '+rec.hardware_source+'\nclient_is_local: '+rec.client_is_local+
+      '\nusable_vram_gb: '+h.usable_vram_gb+'\ntotal_device_gb: '+h.total_device_gb+
+      '\numa: '+h.uma+'\ncomfort_decode_tok_s: '+rec.comfort_decode_tok_s+
+      ((warn.length)?'\n\n警告:\n- '+warn.join('\n- '):'');
+    renderBanner(rec);
     renderPick(rec); renderRows(rec); fillDeployModels(rec);
   } else {
     document.getElementById('pick').textContent='后端未启动';
     document.getElementById('rows').textContent='后端未启动';
   }
   refreshDeployments();
+}
+function renderBanner(rec){
+  var el=document.getElementById('banner');
+  if(rec.client_is_local){
+    el.className='banner local';
+    el.innerHTML='<b>已检测本机</b> · 显示的是你正在使用的这台机器的硬件。';
+  } else {
+    el.className='banner remote';
+    el.innerHTML='<b>共享服务</b> · 当前显示的是<b>你自己的硬件档案</b>（来源：'+esc(rec.hardware_source)+'）。'+
+      '模型部署请在<b>你的本机</b>执行。 <button class="mini" onclick="show(\'profile\')">去检测我的机器</button>';
+  }
 }
 function renderPick(rec){
   var p=rec.recommendation;
@@ -173,22 +341,18 @@ function renderRows(rec){
     html+='<td>'+badge(r.quantization)+'</td><td>'+esc(r.memory_gb)+' GB</td><td>'+esc(r.quality)+'</td>';
     html+='<td>'+resident+'</td><td><div class="muted">'+esc(r.reason)+'</div></td></tr>';
   });
-  return document.getElementById('rows').innerHTML=html+'</tbody></table>';
+  document.getElementById('rows').innerHTML=html+'</tbody></table>';
 }
 function fillDeployModels(rec){
   var sel=document.getElementById('d-model');
   var rows=(rec.recommendations||[]).filter(function(r){return r.fits;});
   sel.innerHTML=rows.map(function(r){
     var tag=(r.source&&r.source.ollama)||'';
-    return '<option value="'+esc(JSON.stringify({id:r.id,name:r.name,ollama:tag,path:r.source&&r.source.huggingface||r.id}))+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
+    return '<option value="'+esc(JSON.stringify({id:r.id,name:r.name,ollama:tag,path:(r.source&&r.source.huggingface)||r.id}))+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
   }).join('');
   syncDeploy();
 }
-function currentModel(){
-  var sel=document.getElementById('d-model');
-  if(!sel.value) return null;
-  try{return JSON.parse(sel.value);}catch(e){return null;}
-}
+function currentModel(){var sel=document.getElementById('d-model');if(!sel.value){return null;}try{return JSON.parse(sel.value);}catch(e){return null;}}
 function syncDeploy(){
   var m=currentModel(); if(!m) return;
   var backend=document.getElementById('d-backend').value;
@@ -200,14 +364,36 @@ function syncDeploy(){
     document.getElementById('d-path').value=m.path||m.id;
     document.getElementById('d-name').value=m.id;
   }
+  refreshAdvisory();
 }
+async function refreshAdvisory(){
+  var remote=LAST&&LAST.client_is_local===false;
+  var allowed=CONFIG.allow_remote_deploy===true;
+  var advisory=document.getElementById('deploy-advisory');
+  var btn=document.getElementById('deploy-btn');
+  if(remote&&!allowed){
+    advisory.style.display='block';
+    btn.disabled=true;
+    document.getElementById('deploy-sub').textContent='共享服务下只能检索；请在本机执行命令。';
+    var m=currentModel();
+    try{
+      var d=await (await fetch('/api/plans/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+        model_id:m?m.id:'custom',model_path:document.getElementById('d-path').value,
+        backend:document.getElementById('d-backend').value,port:+document.getElementById('d-port').value})})).json();
+      document.getElementById('advisory-cmd').textContent=d.command_string;
+    }catch(e){}
+  } else {
+    advisory.style.display='none';
+    btn.disabled=false;
+    document.getElementById('deploy-sub').textContent='创建 → 启动 → 健康检查 → OpenAI 兼容接口。';
+  }
+}
+function copyAdvisory(){copyText(document.getElementById('advisory-cmd').textContent);}
 function usePick(){
   var rec=LAST; if(!rec||!rec.recommendation){return;}
   show('deploy');
   var sel=document.getElementById('d-model');
-  for(var i=0;i<sel.options.length;i++){
-    try{var v=JSON.parse(sel.options[i].value); if(v.id===rec.recommendation.id){sel.selectedIndex=i;break;}}catch(e){}
-  }
+  for(var i=0;i<sel.options.length;i++){try{var v=JSON.parse(sel.options[i].value);if(v.id===rec.recommendation.id){sel.selectedIndex=i;break;}}catch(e){}}
   syncDeploy();
 }
 async function refreshDeployments(){
@@ -230,27 +416,22 @@ async function refreshDeployments(){
 function onTestDepChange(){
   var sel=document.getElementById('t-dep');
   var opt=sel.options[sel.selectedIndex];
-  if(opt&&opt.dataset.model) document.getElementById('t-model').value=opt.dataset.model;
+  if(opt&&opt.dataset.model){document.getElementById('t-model').value=opt.dataset.model;}
   var d=DEPLOYMENTS.filter(function(x){return x.id===sel.value;})[0];
   document.getElementById('t-endpoint').textContent=d?d.endpoint+'\n健康检查: '+d.health_endpoint:'—';
 }
-function depLogs(id){
-  var d=DEPLOYMENTS.filter(function(x){return x.id===id;})[0];
-  document.getElementById('d-log').textContent=(d&&d.log&&d.log.length)?d.log.join('\n'):'（无日志）';
-}
+function depLogs(id){var d=DEPLOYMENTS.filter(function(x){return x.id===id;})[0];document.getElementById('d-log').textContent=(d&&d.log&&d.log.length)?d.log.join('\n'):'（无日志）';}
 async function depStart(id){await fetch('/api/deployments/'+id+'/start',{method:'POST'});refreshDeployments();}
 async function depStop(id){await fetch('/api/deployments/'+id+'/stop',{method:'POST'});refreshDeployments();}
 async function createDeploy(){
   var m=currentModel();
-  var body={
-    model_path:document.getElementById('d-path').value,
-    model_id:m?m.id:'custom',
-    model_name:document.getElementById('d-name').value,
-    backend:document.getElementById('d-backend').value,
-    port:+document.getElementById('d-port').value
-  };
+  var body={model_path:document.getElementById('d-path').value,model_id:m?m.id:'custom',
+    model_name:document.getElementById('d-name').value,backend:document.getElementById('d-backend').value,
+    port:+document.getElementById('d-port').value};
   try{
-    var d=await (await fetch('/api/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+    var r=await fetch('/api/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    if(!r.ok){document.getElementById('d-log').textContent='被拒绝：'+(d.detail||r.status);return;}
     document.getElementById('d-log').textContent='已创建 '+d.id+'，正在启动…';
     await fetch('/api/deployments/'+d.id+'/start',{method:'POST'});
     await refreshDeployments();
@@ -263,23 +444,20 @@ async function runTest(){
   document.getElementById('t-out').textContent='请求中…';
   try{
     var r=await (await fetch('/api/deployments/'+id+'/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      message:document.getElementById('t-msg').value,
-      model_name:document.getElementById('t-model').value,
-      max_tokens:+document.getElementById('t-max').value
-    })})).json();
-    if(r.ok){
-      document.getElementById('t-out').innerHTML='<span class="ok">'+esc(r.status_code)+' '+esc(r.url)+'</span><div class="reply">'+esc(r.reply)+'</div><div class="muted">'+esc(JSON.stringify(r.usage))+'</div>';
-    } else {
-      document.getElementById('t-out').innerHTML='<span class="bad">失败</span> '+esc(r.error||r.status_code);
-    }
+      message:document.getElementById('t-msg').value,model_name:document.getElementById('t-model').value,max_tokens:+document.getElementById('t-max').value})})).json();
+    if(r.ok){document.getElementById('t-out').innerHTML='<span class="ok">'+esc(r.status_code)+' '+esc(r.url)+'</span><div class="reply">'+esc(r.reply)+'</div><div class="muted">'+esc(JSON.stringify(r.usage))+'</div>';}
+    else{document.getElementById('t-out').innerHTML='<span class="bad">失败</span> '+esc(r.error||r.status_code);}
   }catch(e){document.getElementById('t-out').textContent='请求失败：'+e;}
 }
 async function healthCheck(){
-  var id=document.getElementById('t-dep').value;
-  if(!id){return;}
+  var id=document.getElementById('t-dep').value; if(!id){return;}
   var r=await (await fetch('/api/deployments/'+id+'/health')).json();
   document.getElementById('t-out').innerHTML=(r.healthy?'<span class="ok">健康</span>':'<span class="bad">不健康</span>')+' '+esc(r.url)+' '+esc(r.error||r.status_code||'');
 }
 document.getElementById('t-dep').addEventListener('change',onTestDepChange);
-refresh();
+(async function init(){
+  try{CONFIG=await (await fetch('/api/backends')).json();}catch(e){CONFIG={};}
+  await runBrowserProbe();
+  loadProbeCommand();
+})();
 </script></body></html>

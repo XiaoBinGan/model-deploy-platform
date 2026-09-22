@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from .hardware import probe_budget, GIB
+from .hardware import probe_budget, budget_from_profile, GIB
 from . import catalog as catalog_service
 from .catalog import REASON_KEYS, CATALOG
 from .estimator import COMFORT_DECODE_TOK_S
@@ -30,6 +30,10 @@ class RecommendRequest(BaseModel):
     require_local: bool = False
     limit: int = 20
     live: bool = False
+    # Untrusted client hardware profile. When present the resolver prices the
+    # catalog against the *client's* machine, not the server's.
+    hardware: dict | None = None
+    client_is_local: bool = True
 
 
 def _command(args):
@@ -119,11 +123,22 @@ def local():
 
 @router.post("/models/recommend")
 def recommend(req: RecommendRequest):
-    budget = probe_budget(planning=not req.live)
+    # The budget is an input, not a server measurement: a shared service must
+    # price the catalog against the caller's machine, not its own.
+    profile_result = None
+    if req.hardware:
+        profile_result = budget_from_profile(req.hardware, planning=not req.live)
+        budget = profile_result.budget
+    else:
+        budget = probe_budget(planning=not req.live)
     if req.available_vram_gb:
         budget.usable_vram_bytes = int(req.available_vram_gb * GIB)
     if req.available_vram_gb and not budget.uma:
         budget.total_device_bytes = max(budget.total_device_bytes, budget.usable_vram_bytes)
+
+    hardware_warnings = list(profile_result.warnings) if profile_result else []
+    if not req.client_is_local and not req.hardware:
+        hardware_warnings.append("远端请求且未提供客户端硬件，当前显示的是服务器硬件")
 
     resolved = catalog_service.resolve(budget, backend=req.backend)
     local_models = scan_models()
@@ -164,6 +179,11 @@ def recommend(req: RecommendRequest):
     return {
         "mode": "resolver",
         "hardware": budget.to_dict(),
+        "client_is_local": req.client_is_local,
+        "hardware_source": budget.source,
+        "hardware_trusted": profile_result.trusted if profile_result else True,
+        "hardware_warnings": hardware_warnings,
+        "normalized_profile": profile_result.normalized if profile_result else None,
         "comfort_decode_tok_s": COMFORT_DECODE_TOK_S,
         "recommendation": recommendation,
         "reason_key": resolved["reason_key"],
