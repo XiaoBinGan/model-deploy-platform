@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, shell, nativeTheme } = require("electron");
 const { start } = require("./server");
 
 let win = null;
@@ -10,10 +10,15 @@ async function createWindow() {
   // Deployments and their logs live in the app data directory, not the repo.
   local = await start(0, { dataDir: app.getPath("userData") });
   win = new BrowserWindow({
-    width: 1360,
-    height: 920,
-    title: "Model Deploy Platform",
-    backgroundColor: "#0f1115",
+    width: 1080,
+    height: 900,
+    minWidth: 720,
+    // The project name lives in the window title bar, so the page itself has
+    // no brand header and no separate strip at the top.
+    title: "ModelForge",
+    // Match the page background so there is no lighter flash or band on launch.
+    backgroundColor: "#0b0d10",
+    show: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -21,6 +26,7 @@ async function createWindow() {
     },
   });
   win.loadURL(local.url);
+  win.once("ready-to-show", () => win.show());
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
@@ -30,7 +36,12 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Keep the OS title bar in step with the dark UI instead of following the
+  // system appearance, which would give a light bar above a dark page.
+  nativeTheme.themeSource = "dark";
+  createWindow();
+});
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();

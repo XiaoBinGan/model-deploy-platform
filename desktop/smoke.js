@@ -50,7 +50,11 @@ async function waitSettled(base, id, seconds) {
 
   const page = await fetch(base);
   const html = await page.text();
-  check("serves existing frontend", page.status === 200 && html.indexOf("Inference control plane") >= 0,
+  // Assert on the app's real element ids rather than a byte count or a headline,
+  // so a UI restyle does not fail this check.
+  const appMarkers = ['id="pick"', 'id="d-model"', 'id="t-out"', "<main>"];
+  check("serves existing frontend",
+    page.status === 200 && appMarkers.every((m) => html.indexOf(m) >= 0),
     html.length + " bytes");
 
   const rec = (await postJson(base + "api/models/recommend",
