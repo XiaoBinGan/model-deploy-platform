@@ -149,7 +149,7 @@ pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--border);paddi
       <div class="field"><label>部署实例</label><select id="t-dep"></select></div>
       <div class="field"><label>模型名</label><input id="t-model" value="qwen3:8b"></div>
       <div class="field"><label>提示词</label><textarea id="t-msg" rows="3">你好，请用一句话介绍你自己</textarea></div>
-      <div class="field"><label>最大 Token</label><input id="t-max" type="number" value="128"></div>
+      <div class="field"><label>最大 Token</label><input id="t-max" type="number" value="512"><div class="muted" style="font-size:12px;margin-top:4px">思考型模型（qwen3 / deepseek-r1）会先消耗预算思考，建议 512 以上</div></div>
       <button class="primary" onclick="runTest()">发送测试请求</button>
       <div style="margin-top:10px"><button class="mini" onclick="healthCheck()">健康检查</button></div>
     </div>
@@ -482,7 +482,7 @@ async function runTest(){
   try{
     var r=await (await fetch('/api/deployments/'+id+'/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
       message:document.getElementById('t-msg').value,model_name:document.getElementById('t-model').value,max_tokens:+document.getElementById('t-max').value})})).json();
-    if(r.ok){document.getElementById('t-out').innerHTML='<span class="ok">'+esc(r.status_code)+' '+esc(r.url)+'</span><div class="reply">'+esc(r.reply)+'</div><div class="muted">'+esc(JSON.stringify(r.usage))+'</div>';}
+    if(r.ok){document.getElementById('t-out').innerHTML='<span class="ok">'+esc(r.status_code)+' '+esc(r.url)+'</span>'+(r.reply_source==='reasoning'?'<span class="warn"> · 来自思考内容</span>':'')+'<div class="reply">'+esc(r.reply)+'</div>'+(r.hint?'<div class="warn">'+esc(r.hint)+'</div>':'')+'<div class="muted">'+esc(JSON.stringify(r.usage))+'</div>';}
     else{document.getElementById('t-out').innerHTML='<span class="bad">失败</span> '+esc(r.error||r.status_code);}
   }catch(e){document.getElementById('t-out').textContent='请求失败：'+e;}
 }

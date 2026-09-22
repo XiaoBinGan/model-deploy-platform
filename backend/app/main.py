@@ -232,7 +232,7 @@ def deployment_health(dep_id: str):
 class DeploymentTestRequest(BaseModel):
     message: str = "你好，请用一句话介绍你自己"
     model_name: str | None = None
-    max_tokens: int = 128
+    max_tokens: int = 512
 
 @app.post("/api/deployments/{dep_id}/test")
 def deployment_test(dep_id: str, req: DeploymentTestRequest):

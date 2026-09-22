@@ -382,7 +382,7 @@ class Deployments {
         body: JSON.stringify({
           model,
           messages: [{ role: "user", content: message || "你好，请用一句话介绍你自己" }],
-          max_tokens: Number(maxTokens) || 128,
+          max_tokens: Number(maxTokens) || 512,
         }),
         signal: AbortSignal.timeout(120000),
       });
@@ -390,13 +390,37 @@ class Deployments {
         return { ok: false, url, status_code: r.status, error: (await r.text()).slice(0, 500) };
       }
       const data = await r.json();
-      let reply = "";
-      try {
-        reply = data.choices[0].message.content;
-      } catch (e) {
-        reply = JSON.stringify(data).slice(0, 500);
+      const choice = (data.choices || [])[0] || {};
+      // Named replyMessage, not message: message is this function parameter and
+      // is still referenced by the request body above.
+      const replyMessage = choice.message || {};
+      let reply = typeof replyMessage.content === "string" ? replyMessage.content : "";
+      let source = "content";
+      // Thinking models (qwen3, deepseek-r1) put the visible answer in content
+      // and the chain of thought in reasoning. If the token budget runs out
+      // mid-thought, content is empty and reasoning holds the only text there
+      // is; returning blank would look like a broken deployment.
+      if (!reply.trim()) {
+        const thought = replyMessage.reasoning || replyMessage.reasoning_content;
+        if (typeof thought === "string" && thought.trim()) {
+          reply = thought;
+          source = "reasoning";
+        }
       }
-      return { ok: true, url, status_code: r.status, model, reply, usage: data.usage || {} };
+      const result = {
+        ok: true,
+        url,
+        status_code: r.status,
+        model,
+        reply,
+        reply_source: source,
+        finish_reason: choice.finish_reason || null,
+        usage: data.usage || {},
+      };
+      if (choice.finish_reason === "length" && source === "reasoning") {
+        result.hint = "回复被 max tokens 截断：模型把预算用在了思考上。请把最大 Token 调到 512 以上。";
+      }
+      return result;
     } catch (e) {
       return { ok: false, url, error: e.message };
     }

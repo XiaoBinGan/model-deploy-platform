@@ -187,7 +187,7 @@ def health(deployment_id: str) -> dict:
                 "error": str(e), "status": dep["status"]}
 
 def test_chat(deployment_id: str, message: str = "你好，请用一句话介绍你自己",
-              model_name: str | None = None, max_tokens: int = 128) -> dict:
+              model_name: str | None = None, max_tokens: int = 512) -> dict:
     """Send a real OpenAI-compatible chat completion to the deployed service."""
     dep = DEPLOYMENTS.get(deployment_id)
     if not dep:
@@ -203,12 +203,27 @@ def test_chat(deployment_id: str, message: str = "你好，请用一句话介绍
         if r.status_code != 200:
             return {"ok": False, "url": url, "status_code": r.status_code, "error": r.text[:500]}
         data = r.json()
-        reply = ""
-        try:
-            reply = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            reply = json.dumps(data)[:500]
-        return {"ok": True, "url": url, "status_code": r.status_code, "model": model,
-                "reply": reply, "usage": data.get("usage", {})}
+        choice = (data.get("choices") or [{}])[0]
+        reply_message = choice.get("message") or {}
+        reply = reply_message.get("content") or ""
+        source = "content"
+        # Thinking models keep the visible answer in content and the chain of
+        # thought in reasoning. When the budget runs out mid-thought, content is
+        # empty and reasoning is the only text available; a blank reply would
+        # look like a broken deployment.
+        if not reply.strip():
+            thought = reply_message.get("reasoning") or reply_message.get("reasoning_content")
+            if isinstance(thought, str) and thought.strip():
+                reply = thought
+                source = "reasoning"
+        result = {
+            "ok": True, "url": url, "status_code": r.status_code, "model": model,
+            "reply": reply, "reply_source": source,
+            "finish_reason": choice.get("finish_reason"),
+            "usage": data.get("usage", {}),
+        }
+        if choice.get("finish_reason") == "length" and source == "reasoning":
+            result["hint"] = "回复被 max tokens 截断：模型把预算用在了思考上。请把最大 Token 调到 512 以上。"
+        return result
     except Exception as e:
         return {"ok": False, "url": url, "error": str(e)}

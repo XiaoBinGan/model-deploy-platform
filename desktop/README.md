@@ -67,6 +67,29 @@ node smoke.js                     # 12 项，不需要 Electron
 node smoke.js --ollama qwen3:8b   # 额外真机加载 + 对话 + 卸载
 ```
 
+## 思考型模型（qwen3 / deepseek-r1）
+
+这类模型会先产出一段思考，放在 `message.reasoning`，然后才是 `message.content`。
+如果 `max_tokens` 太小，预算会在**思考阶段**耗尽，`content` 返回空字符串——
+HTTP 200、`ok: true`，但看起来像部署坏了。
+
+实测数据（qwen3:8b，同一句话）：
+
+| max_tokens | 结果 |
+|---|---|
+| 128（旧默认） | 空白 |
+| 256 | 时好时坏，取决于思考长度 |
+| 512 | 正常，约 200-290 completion tokens |
+
+所以服务测试页默认改成 **512**，并且：
+
+- `content` 为空时回退显示 `reasoning`，并标记「来自思考内容」
+- `finish_reason: length` 时给出明确提示，而不是静默返回空白
+
+**注意**：ollama 的 OpenAI 兼容端点**不认** `think: false`。
+实测加上它反而让 `finish_reason` 变成 `length` 且内容为空，所以不要用它。
+要缩短思考只能调大预算。
+
 ## 已知限制
 
 - llama.cpp 需要本机 `.gguf` 文件路径；HuggingFace 仓库 id 不能直接启动
