@@ -217,6 +217,13 @@ def start_deployment(dep_id: str):
 def stop_deployment(dep_id: str):
     return deployments.stop(dep_id)
 
+@app.delete("/api/deployments/{dep_id}")
+def delete_deployment(dep_id: str):
+    try:
+        return deployments.delete(dep_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 @app.get("/api/deployments")
 def list_deployments():
     return {"deployments": deployments.list_all()}

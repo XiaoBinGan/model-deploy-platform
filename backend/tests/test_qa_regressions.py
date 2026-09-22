@@ -32,6 +32,23 @@ def test_deployment_ids_are_unique_within_the_same_second():
         deployments.DEPLOYMENTS.update(saved)
 
 
+def test_delete_removes_the_deployment():
+    """There was no way to remove a deployment, so the list only ever grew."""
+    saved = dict(deployments.DEPLOYMENTS)
+    deployments.DEPLOYMENTS.clear()
+    try:
+        dep = deployments.create(model_path="/m/x", model_id="x", backend="vllm")
+        assert deployments.get(dep["id"])["id"] == dep["id"]
+        deployments.delete(dep["id"])
+        assert deployments.get(dep["id"]) == {}
+        assert deployments.list_all() == []
+        with pytest.raises(ValueError):
+            deployments.delete(dep["id"])
+    finally:
+        deployments.DEPLOYMENTS.clear()
+        deployments.DEPLOYMENTS.update(saved)
+
+
 def test_command_string_escapes_model_path():
     """command_string is copied into a shell, so metacharacters must stay literal.
 

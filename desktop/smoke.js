@@ -119,6 +119,25 @@ async function waitSettled(base, id, seconds) {
   const list = (await getJson(base + "api/deployments")).body || {};
   check("deployments persisted", (list.deployments || []).length === 1, (list.deployments || []).length + " item(s)");
 
+  // --- deletion: the list used to grow forever with no way to remove anything ---
+  const delRes = await fetch(base + "api/deployments/" + bad.id, { method: "DELETE" });
+  const delBody = await delRes.json().catch(() => null);
+  const after = (await getJson(base + "api/deployments")).body || {};
+  check("delete removes the deployment",
+    delRes.status === 200 && delBody && delBody.deleted === true &&
+      (after.deployments || []).length === 0,
+    "status=" + delRes.status + " remaining=" + (after.deployments || []).length);
+
+  const delMissing = await fetch(base + "api/deployments/dep_does_not_exist", { method: "DELETE" });
+  check("deleting an unknown deployment fails cleanly",
+    delMissing.status >= 400 && delMissing.status < 500, "status=" + delMissing.status);
+
+  // --- backends must only advertise what the app can actually start ---
+  const be = (await getJson(base + "api/backends")).body || {};
+  check("backends lists only deployable ones",
+    Array.isArray(be.backends) && be.backends.indexOf("vllm") < 0 && be.backends.indexOf("ollama") >= 0,
+    JSON.stringify(be.backends) + " installed=" + JSON.stringify(be.installed || []));
+
   // --- real end-to-end: only when a model is named on the command line ---
   const flag = process.argv.indexOf("--ollama");
   if (flag > 0 && process.argv[flag + 1]) {

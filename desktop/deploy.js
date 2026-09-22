@@ -88,13 +88,18 @@ class Deployments {
   }
 
   async detectBackends() {
+    // Only advertise what this app can actually start. vLLM and SGLang used to
+    // be listed when their binaries existed, but _run() blocks them here, so
+    // choosing one only produced a deployment that failed at start.
     const backends = [];
+    const installed = [];
     if (await reachable(OLLAMA_BASE + "/api/tags", 1500)) backends.push("ollama");
     if (await hasBinary("llama-server")) backends.push("llama.cpp");
-    if (await hasBinary("vllm")) backends.push("vllm");
+    if (await hasBinary("vllm")) installed.push("vllm");
+    if (await hasBinary("sglang")) installed.push("sglang");
     // allow_remote_deploy is always true here: in the desktop app every
     // deployment is local by definition.
-    return { backends, allow_remote_deploy: true, local: true };
+    return { backends, installed, allow_remote_deploy: true, local: true };
   }
 
   create(req) {
@@ -442,6 +447,19 @@ class Deployments {
     item.pid = null;
     this._save();
     return item;
+  }
+
+  async delete(id) {
+    const item = this.items.get(id);
+    if (!item) throw new Error("Deployment " + id + " not found");
+    // Stop first so a deleted deployment never leaves a child behind.
+    if (this.procs.has(id) || item.status === "RUNNING" || item.status === "STARTING") {
+      await this.stop(id).catch(() => {});
+    }
+    this.procs.delete(id);
+    this.items.delete(id);
+    this._save();
+    return { id, deleted: true };
   }
 
   // Called on app quit and on server close so no child outlives the window.

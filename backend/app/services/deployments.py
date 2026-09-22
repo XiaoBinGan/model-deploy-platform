@@ -168,6 +168,22 @@ def stop(deployment_id: str) -> dict:
     dep["status"] = "STOPPED"
     return dep
 
+def delete(deployment_id: str) -> dict:
+    """Stop the deployment if it is live, then drop the record.
+
+    Before this the list only ever grew: create/start/stop existed but nothing
+    could remove a deployment, so junk entries accumulated with no way out.
+    """
+    dep = DEPLOYMENTS.get(deployment_id)
+    if not dep:
+        raise ValueError(f"Deployment {deployment_id} not found")
+    if dep.get("pid") or dep.get("status") in ("RUNNING", "STARTING"):
+        try:
+            stop(deployment_id)
+        except Exception:
+            pass
+    return DEPLOYMENTS.pop(deployment_id)
+
 def get(deployment_id: str) -> dict:
     return DEPLOYMENTS.get(deployment_id, {})
 

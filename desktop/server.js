@@ -106,6 +106,9 @@ async function handle(req, res) {
       if (id && action === "stop" && req.method === "POST") {
         return send(res, 200, JSON.stringify(await deploys.stop(id)));
       }
+      if (id && !action && req.method === "DELETE") {
+        return send(res, 200, JSON.stringify(await deploys.delete(id)));
+      }
       if (id && action === "health" && req.method === "GET") {
         return send(res, 200, JSON.stringify(await deploys.health(id)));
       }

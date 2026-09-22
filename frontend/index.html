@@ -408,6 +408,34 @@ function fillDeployModels(rec){
   }).join('');
   syncDeploy();
 }
+// Both backend dropdowns were hardcoded to the full list, so an unavailable
+// backend could be picked and the deployment only failed at start. The data was
+// already being fetched into CONFIG; this is what uses it.
+var ALL_BACKENDS=['ollama','llama.cpp','transformers','vllm','sglang'];
+function backendNote(b,available,installed){
+  if(!available||available.indexOf(b)>=0){return '';}
+  if(installed&&installed.indexOf(b)>=0){return ' · 桌面端不支持';}
+  return ' · 本机未安装';
+}
+function fillBackends(){
+  var available=(CONFIG&&CONFIG.backends&&CONFIG.backends.length)?CONFIG.backends:null;
+  var installed=(CONFIG&&CONFIG.installed)||[];
+  ['backend','d-backend'].forEach(function(id){
+    var sel=document.getElementById(id);
+    if(!sel){return;}
+    var current=sel.value;
+    sel.innerHTML=ALL_BACKENDS.map(function(b){
+      var ok=!available||available.indexOf(b)>=0;
+      return '<option value="'+b+'"'+(ok?'':' disabled')+'>'+b+backendNote(b,available,installed)+'</option>';
+    }).join('');
+    // Keep the previous choice when it is still selectable, otherwise fall to
+    // the first backend that actually works.
+    var want=sel.querySelector('option[value="'+current+'"]');
+    if(want&&!want.disabled){sel.selectedIndex=want.index;return;}
+    var first=sel.querySelector('option:not([disabled])');
+    if(first){sel.selectedIndex=first.index;}
+  });
+}
 function currentModel(){
   var sel=document.getElementById('d-model');
   if(sel.value===''){return null;}
@@ -466,7 +494,7 @@ async function refreshDeployments(){
     var cls=d.status==='RUNNING'?'ok':(d.status==='FAILED'||d.status==='BLOCKED'?'bad':'warn');
     html+='<tr><td>'+esc(d.id)+'</td><td>'+esc(d.model_path)+'</td><td>'+esc(d.backend)+'</td>';
     html+='<td><span class="'+cls+'">'+esc(d.status)+'</span></td><td class="muted">'+esc(d.endpoint)+'</td>';
-    html+='<td><button class="mini" onclick="depStart(\''+d.id+'\')">启动</button> <button class="mini" onclick="depStop(\''+d.id+'\')">停止</button> <button class="mini" onclick="depLogs(\''+d.id+'\')">日志</button></td></tr>';
+    html+='<td><button class="mini" onclick="depStart(\''+d.id+'\')">启动</button> <button class="mini" onclick="depStop(\''+d.id+'\')">停止</button> <button class="mini" onclick="depLogs(\''+d.id+'\')">日志</button> <button class="mini" onclick="depDelete(\''+d.id+'\')">删除</button></td></tr>';
   });
   document.getElementById('d-list').innerHTML=DEPLOYMENTS.length?html+'</tbody></table>':'暂无部署';
   clearTimeout(window.__depPoll);
@@ -485,6 +513,15 @@ function onTestDepChange(){
 function depLogs(id){var d=DEPLOYMENTS.filter(function(x){return x.id===id;})[0];document.getElementById('d-log').textContent=(d&&d.log&&d.log.length)?d.log.join('\n'):'（无日志）';}
 async function depStart(id){await fetch('/api/deployments/'+id+'/start',{method:'POST'});refreshDeployments();}
 async function depStop(id){await fetch('/api/deployments/'+id+'/stop',{method:'POST'});refreshDeployments();}
+async function depDelete(id){
+  if(!confirm('删除部署 '+id+'？正在运行的会先停止。')){return;}
+  try{
+    var r=await fetch('/api/deployments/'+id,{method:'DELETE'});
+    if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='删除失败：'+(d.detail||r.status);return;}
+    document.getElementById('d-log').textContent='已删除 '+id;
+  }catch(e){document.getElementById('d-log').textContent='删除失败：'+e;}
+  refreshDeployments();
+}
 async function createDeploy(){
   var m=currentModel();
   var body={model_path:document.getElementById('d-path').value,model_id:m?m.id:'custom',
@@ -519,6 +556,7 @@ async function healthCheck(){
 document.getElementById('t-dep').addEventListener('change',onTestDepChange);
 (async function init(){
   try{CONFIG=await (await fetch('/api/backends')).json();}catch(e){CONFIG={};}
+  fillBackends();
   renderPresets();
   await runBrowserProbe();
   loadProbeCommand();
