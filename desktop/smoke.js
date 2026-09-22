@@ -57,6 +57,18 @@ async function waitSettled(base, id, seconds) {
     page.status === 200 && appMarkers.every((m) => html.indexOf(m) >= 0),
     html.length + " bytes");
 
+  // The deploy dropdown used to serialise JSON into value="..." and the browser
+  // truncated it at the first quote, so option.value was "{" and JSON.parse
+  // always threw. Guard both halves of that fix.
+  const escSrc = (html.match(/function esc\(s\)\{[^}]*\}/) || [""])[0];
+  check("frontend esc escapes quotes",
+    escSrc.indexOf("&quot;") >= 0 && escSrc.indexOf("&#39;") >= 0);
+  // Scope this to the deploy dropdown itself: esc(JSON.stringify(...)) is still
+  // correct elsewhere, where the result lands in text rather than in an attribute.
+  const fillSrc = (html.match(/function fillDeployModels\(rec\)\{[\s\S]*?\n\}/) || [""])[0];
+  check("deploy dropdown keeps model data out of the attribute",
+    fillSrc.indexOf("JSON.stringify") < 0 && fillSrc.indexOf("DEPLOY_MODELS") >= 0);
+
   const rec = (await postJson(base + "api/models/recommend",
     { task: "chat", goal: "balanced", backend: "ollama", limit: 5 })).body || {};
   check("recommend is client-side", rec.client_is_local === true && rec.hardware_source === "client:agent",

@@ -6,6 +6,8 @@ comes off a ladder (floor 64K -> x1.5 -> native cap), KV is quantized to q8_0
 to buy window, and flash attention is on. The decision is returned as data so
 the UI can show it and presets can record it.
 """
+import shlex
+
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
@@ -158,7 +160,10 @@ def preview(req: PlanRequest):
         "predicted_decode_tok_s": tok_s,
         "warnings": warnings,
         "command": cmd,
-        "command_string": " ".join(cmd),
+        # shlex.join, not " ".join: the string is shown to users to copy into a
+        # shell, so a model path containing spaces or metacharacters must stay
+        # one argument instead of becoming several commands.
+        "command_string": shlex.join(cmd),
         "decision": decision,
         "hardware": budget.to_dict(),
         "hardware_source": hardware_source,

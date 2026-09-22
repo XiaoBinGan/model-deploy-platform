@@ -180,7 +180,7 @@ function jump(id){
   el.scrollIntoView({behavior:'smooth',block:'start'});
 }
 function fmt(gb){return (gb===null||gb===undefined)?'—':gb+' GB';}
-function esc(s){return String(s===undefined||s===null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+function esc(s){return String(s===undefined||s===null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function badge(t,cls){return '<span class="tag '+(cls||'')+'">'+esc(t)+'</span>';}
 function copyText(text){
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text);return;}
@@ -393,16 +393,26 @@ function renderRows(rec){
   });
   document.getElementById('rows').innerHTML=html+'</tbody></table>';
 }
+// The model payload lives here and each option carries only its index.
+// Serialising JSON into a value="..." attribute made the browser truncate it
+// at the first quote, so option.value was "{" and JSON.parse always threw.
+var DEPLOY_MODELS=[];
 function fillDeployModels(rec){
   var sel=document.getElementById('d-model');
   var rows=(rec.recommendations||[]).filter(function(r){return r.fits;});
-  sel.innerHTML=rows.map(function(r){
-    var tag=(r.source&&r.source.ollama)||'';
-    return '<option value="'+esc(JSON.stringify({id:r.id,name:r.name,ollama:tag,path:(r.source&&r.source.huggingface)||r.id}))+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
+  DEPLOY_MODELS=rows.map(function(r){
+    return {id:r.id,name:r.name,ollama:(r.source&&r.source.ollama)||'',path:(r.source&&r.source.huggingface)||r.id};
+  });
+  sel.innerHTML=rows.map(function(r,i){
+    return '<option value="'+i+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
   }).join('');
   syncDeploy();
 }
-function currentModel(){var sel=document.getElementById('d-model');if(!sel.value){return null;}try{return JSON.parse(sel.value);}catch(e){return null;}}
+function currentModel(){
+  var sel=document.getElementById('d-model');
+  if(sel.value===''){return null;}
+  return DEPLOY_MODELS[+sel.value]||null;
+}
 function syncDeploy(){
   var m=currentModel(); if(!m) return;
   var backend=document.getElementById('d-backend').value;

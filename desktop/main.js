@@ -51,3 +51,13 @@ app.on("window-all-closed", () => {
   if (local) local.close();
   if (process.platform !== "darwin") app.quit();
 });
+
+// Quitting must not leave llama-server or an ollama pull behind. before-quit is
+// synchronous, so hold the quit until the children are actually reaped.
+let quitting = false;
+app.on("before-quit", (event) => {
+  if (quitting || !local || !local.stopAll) return;
+  event.preventDefault();
+  quitting = true;
+  local.stopAll().finally(() => app.quit());
+});

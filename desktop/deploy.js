@@ -7,6 +7,8 @@ const path = require("node:path");
 const OLLAMA_BASE = "http://127.0.0.1:11434";
 const OLLAMA_PORT = 11434;
 const START_TIMEOUT_S = 90;
+const PULL_TIMEOUT_MS = 30 * 60 * 1000;
+const STOP_GRACE_MS = 5000;
 
 function nowIso() {
   return new Date().toISOString().replace(/[.][0-9]{3}Z$/, "Z");
@@ -134,10 +136,16 @@ class Deployments {
   start(id) {
     const item = this.items.get(id);
     if (!item) throw new Error("Deployment " + id + " not found");
-    if (item.status === "RUNNING") return item;
+    // STARTING must be a no-op too. Starting twice spawned two servers and the
+    // second overwrote the first in this.procs, leaking a process that stop()
+    // could no longer reach.
+    if (item.status === "RUNNING" || item.status === "STARTING") return item;
     item.status = "STARTING";
+    item.gen = (item.gen || 0) + 1;
+    const gen = item.gen;
     this._save();
-    this._run(item).catch((e) => {
+    this._run(item, gen).catch((e) => {
+      if (this._stale(item, gen)) return;
       item.status = "FAILED";
       this._log(item, "启动失败：" + ((e && e.message) || e));
       this._save();
@@ -145,20 +153,61 @@ class Deployments {
     return item;
   }
 
-  async _run(item) {
-    if (item.backend === "ollama") return this._runOllama(item);
-    if (item.backend === "llama.cpp" || item.backend === "llamacpp") return this._runLlama(item);
+  // Every start and stop bumps item.gen. Work still in flight from an older
+  // generation must not write status back, or a stop gets undone by the start
+  // it interrupted.
+  _stale(item, gen) {
+    return item.gen !== gen;
+  }
+
+  // SIGTERM, then SIGKILL if the process is still alive after the grace period.
+  // llama-server and ollama both ignore SIGTERM in some states, and a process
+  // that survived was still reported as stopped.
+  _kill(proc, graceMs) {
+    return new Promise((resolve) => {
+      if (!proc || proc.exitCode !== null || proc.signalCode) return resolve();
+      let done = false;
+      let timer = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      proc.once("close", finish);
+      timer = setTimeout(() => {
+        if (done) return;
+        try {
+          proc.kill("SIGKILL");
+        } catch (e) {
+          // Already gone.
+        }
+        setTimeout(finish, 500);
+      }, graceMs || STOP_GRACE_MS);
+      try {
+        proc.kill("SIGTERM");
+      } catch (e) {
+        finish();
+      }
+    });
+  }
+
+  async _run(item, gen) {
+    if (item.backend === "ollama") return this._runOllama(item, gen);
+    if (item.backend === "llama.cpp" || item.backend === "llamacpp") return this._runLlama(item, gen);
     item.status = "BLOCKED";
     this._log(item, item.backend + " 在桌面端不支持：它面向 Linux 服务器，请改用 ollama 或 llama.cpp。");
     this._save();
   }
 
-  async _runOllama(item) {
+  async _runOllama(item, gen) {
     const model = item.model_path;
     const tags = await this._ollamaTags();
+    if (this._stale(item, gen)) return;
     if (!tags.includes(model)) {
       this._log(item, "本地没有 " + model + "，开始 ollama pull（可能要几分钟）…");
-      await this._ollamaPull(item, model);
+      await this._ollamaPull(item, model, gen);
+      if (this._stale(item, gen)) return;
     }
     this._log(item, "加载 " + model + " 到内存…");
     try {
@@ -168,6 +217,9 @@ class Deployments {
         body: JSON.stringify({ model, prompt: "", stream: false, keep_alive: "30m" }),
         signal: AbortSignal.timeout(180000),
       });
+      // The user may have pressed stop while this request was in flight; if so
+      // it must not flip the deployment back to RUNNING and re-pin the model.
+      if (this._stale(item, gen)) return;
       if (!r.ok) {
         item.status = "FAILED";
         this._log(item, "Ollama 返回 " + r.status + "：" + (await r.text()).slice(0, 200));
@@ -176,6 +228,7 @@ class Deployments {
         this._log(item, model + " 已常驻内存（keep_alive 30m）");
       }
     } catch (e) {
+      if (this._stale(item, gen)) return;
       item.status = "FAILED";
       this._log(item, "Ollama 调用失败：" + e.message);
     }
@@ -193,7 +246,7 @@ class Deployments {
     }
   }
 
-  _ollamaPull(item, model) {
+  _ollamaPull(item, model, gen) {
     return new Promise((resolve) => {
       let proc;
       try {
@@ -202,6 +255,26 @@ class Deployments {
         this._log(item, "无法执行 ollama：" + e.message);
         return resolve();
       }
+      // Register the pull so stop() can reach it. A pull can run for many
+      // minutes and used to be invisible to the process table.
+      this.procs.set(item.id, { proc, kind: "pull" });
+      item.pid = proc.pid;
+      let settled = false;
+      let timer = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        const cur = this.procs.get(item.id);
+        if (cur && cur.proc === proc) this.procs.delete(item.id);
+        resolve();
+      };
+      timer = setTimeout(async () => {
+        if (settled) return;
+        this._log(item, "ollama pull 超过 " + PULL_TIMEOUT_MS / 60000 + " 分钟，已终止");
+        await this._kill(proc, 3000);
+        finish();
+      }, PULL_TIMEOUT_MS);
       const onData = (buf) => {
         const text = String(buf).replace(/\r/g, "").trim();
         if (text) this._log(item, text.split("\n").pop());
@@ -210,16 +283,16 @@ class Deployments {
       proc.stderr.on("data", onData);
       proc.on("error", (e) => {
         this._log(item, "无法执行 ollama：" + e.message);
-        resolve();
+        finish();
       });
       proc.on("close", (code) => {
         this._log(item, "ollama pull 退出码 " + code);
-        resolve();
+        finish();
       });
     });
   }
 
-  async _runLlama(item) {
+  async _runLlama(item, gen) {
     if (!fs.existsSync(item.model_path)) {
       item.status = "FAILED";
       this._log(item, "找不到模型文件：" + item.model_path);
@@ -249,7 +322,7 @@ class Deployments {
       this._save();
       return;
     }
-    this.procs.set(item.id, proc);
+    this.procs.set(item.id, { proc, kind: "server" });
     item.pid = proc.pid;
 
     const onData = (buf) => {
@@ -264,7 +337,11 @@ class Deployments {
       this._save();
     });
     proc.on("close", (code) => {
-      this.procs.delete(item.id);
+      // Only clear the slot if it still holds this process: a newer start may
+      // already have replaced it.
+      const cur = this.procs.get(item.id);
+      if (cur && cur.proc === proc) this.procs.delete(item.id);
+      if (this._stale(item, gen)) return;
       item.pid = null;
       if (item.status !== "STOPPED") {
         item.status = code === 0 ? "STOPPED" : "FAILED";
@@ -273,19 +350,24 @@ class Deployments {
       this._save();
     });
 
-    const healthy = await this._waitHealthy(item, START_TIMEOUT_S);
+    const healthy = await this._waitHealthy(item, START_TIMEOUT_S, gen);
+    if (this._stale(item, gen)) return;
     if (healthy) {
       item.status = "RUNNING";
       this._log(item, "llama-server 就绪：" + item.endpoint);
     } else if (item.status === "STARTING") {
       item.status = "FAILED";
-      this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s）");
+      this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s），已终止进程");
+      // A timed-out server used to be left running as an orphan holding its
+      // memory and port.
+      await this._kill(proc, STOP_GRACE_MS);
     }
     this._save();
   }
 
-  async _waitHealthy(item, seconds) {
+  async _waitHealthy(item, seconds, gen) {
     for (let i = 0; i < seconds; i += 1) {
+      if (this._stale(item, gen)) return false;
       if (item.status === "STOPPED" || item.status === "FAILED") return false;
       const code = await reachable(item.health_endpoint, 1500);
       if (code === 200) return true;
@@ -330,14 +412,18 @@ class Deployments {
   async stop(id) {
     const item = this.items.get(id);
     if (!item) throw new Error("Deployment " + id + " not found");
-    const proc = this.procs.get(id);
-    if (proc) {
-      try {
-        proc.kill("SIGTERM");
-      } catch (e) {
-        // Already gone.
-      }
-      this.procs.delete(id);
+    // Bump the generation first: a start still in flight is now stale and must
+    // not flip the status back to RUNNING when it completes.
+    item.gen = (item.gen || 0) + 1;
+    item.status = "STOPPING";
+    this._save();
+    const entry = this.procs.get(id);
+    if (entry) {
+      // Wait for the process to actually die before reporting STOPPED.
+      // SIGTERM alone left servers alive that still held their memory.
+      await this._kill(entry.proc, STOP_GRACE_MS);
+      const cur = this.procs.get(id);
+      if (cur === entry) this.procs.delete(id);
     }
     if (item.backend === "ollama") {
       try {
@@ -356,6 +442,12 @@ class Deployments {
     item.pid = null;
     this._save();
     return item;
+  }
+
+  // Called on app quit and on server close so no child outlives the window.
+  async stopAll() {
+    const ids = [...this.items.keys()];
+    await Promise.all(ids.map((id) => this.stop(id).catch(() => {})));
   }
 
   async health(id) {

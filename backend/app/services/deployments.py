@@ -1,5 +1,5 @@
 """Deployment service — manages model deployments via available runtimes."""
-import subprocess, sys, time, os, signal, json
+import subprocess, sys, time, os, signal, json, uuid
 from pathlib import Path
 import httpx
 
@@ -43,7 +43,9 @@ def available_backends() -> dict:
     return {"backends": _detect_backends()}
 
 def create(model_path: str, model_id: str, backend: str | None = None, port: int = 8000, dtype: str = "bfloat16", quantization: str | None = None, model_name: str | None = None, public_host: str | None = None) -> dict:
-    dep_id = f"dep_{int(time.time())}"
+    # A seconds-resolution timestamp made every deployment created in the same
+    # second share an id, so they overwrote each other.
+    dep_id = "dep_" + uuid.uuid4().hex[:12]
     detected = _detect_backends()
     actual_backend = backend or (detected[0] if detected else "transformers")
 

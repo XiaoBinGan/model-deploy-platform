@@ -168,7 +168,13 @@ function start(port, options) {
         url: "http://127.0.0.1:" + addr.port + "/",
         port: addr.port,
         dataDir,
-        close: () => server.close(),
+        // Reap every child before the server goes away; otherwise a
+        // llama-server or ollama pull outlives the window.
+        stopAll: () => (deploys ? deploys.stopAll() : Promise.resolve()),
+        close: async () => {
+          if (deploys) await deploys.stopAll();
+          server.close();
+        },
       });
     });
   });
