@@ -93,6 +93,7 @@ pre{white-space:pre-wrap;background:#090b0e;border:1px solid var(--border);paddi
         <div class="field"><label>CPU 核数</label><input id="pf-cores" type="number" min="1" max="1024"></div>
         <div class="field"><label>内存 (GB)</label><input id="pf-ram" type="number" step="0.5" min="0.5" max="4096"></div>
       </div>
+      <div class="field"><label>常见内存档位（Apple 统一内存）</label><div id="pf-presets"></div></div>
       <div class="field"><label>GPU 名称</label><input id="pf-gpu" placeholder="Apple M4 Pro / NVIDIA GeForce RTX 4090"></div>
       <div class="row">
         <div class="field"><label>显存 (GB，统一内存留空)</label><input id="pf-vram" type="number" step="0.5" min="0.5" max="4096"></div>
@@ -193,6 +194,9 @@ async function resolveGPU(name){
 async function runBrowserProbe(){
   var ua=navigator.userAgent||'';
   var p={source:'browser',platform:'unknown',architecture:'',cpu_cores:navigator.hardwareConcurrency||null,ram_gb:(navigator.deviceMemory||null),gpus:[]};
+  if(navigator.deviceMemory===undefined){p.ram_source='unavailable';}
+  else if(navigator.deviceMemory>=8){p.ram_source='capped';}
+  else{p.ram_source='bucket';}
   if(/Mac OS X|Macintosh/.test(ua)){p.platform='darwin';}
   else if(/Windows/.test(ua)){p.platform='win32';}
   else if(/Linux/.test(ua)){p.platform='linux';}
@@ -243,7 +247,8 @@ async function resolveProfile(){
       'source: '+d.source+'\ntrusted: '+d.trusted+'\numa: '+b.uma+
       '\nusable_vram_gb: '+b.usable_vram_gb+'\ntotal_device_gb: '+b.total_device_gb+
       '\ndevice: '+b.device_name+
-      ((d.warnings&&d.warnings.length)?'\n\n警告:\n- '+d.warnings.join('\n- '):'');
+      ((d.warnings&&d.warnings.length)?'\n\n警告:\n- '+d.warnings.join('\n- '):'')+
+      ramHint();
   }catch(e){document.getElementById('pf-out').textContent='解析失败：'+e;}
   refresh();
 }
@@ -273,6 +278,25 @@ async function loadProbeCommand(){
   }catch(e){}
 }
 function copyProbe(){copyText(document.getElementById('pf-cmd').textContent);}
+function ramHint(){
+  if(PROFILE.ram_source==='unavailable'){return '\n\n提示：你的浏览器不提供内存信息，请手动选择档位或用本机探测。';}
+  if(PROFILE.ram_source==='capped'){return '\n\n提示：浏览器内存档位封顶 8GB；若实际更大，请用上方档位或本机探测确认。';}
+  return '';
+}
+function quickRam(gb){
+  document.getElementById('pf-ram').value=gb;
+  document.getElementById('pf-uma').value='true';
+  if(!document.getElementById('pf-gpu').value.trim()){
+    document.getElementById('pf-gpu').value='Apple GPU';
+  }
+  applyProfileForm();
+}
+function renderPresets(){
+  var sizes=[8,16,18,24,32,36,48,64,96,128];
+  document.getElementById('pf-presets').innerHTML=sizes.map(function(s){
+    return '<button class="mini" style="margin:2px" onclick="quickRam('+s+')">'+s+' GB</button>';
+  }).join('');
+}
 
 async function refresh(){
   var backend=document.getElementById('backend').value||'ollama';
@@ -324,7 +348,18 @@ function renderBanner(rec){
 }
 function renderPick(rec){
   var p=rec.recommendation;
-  if(!p){document.getElementById('pick').innerHTML='<div class="warn">无自动推荐</div><div class="muted">'+esc(rec.reason)+'</div>';return;}
+  if(!p){
+    var usable=(rec.hardware&&rec.hardware.usable_vram_gb)||0;
+    if(usable<=0){
+      document.getElementById('pick').innerHTML='<div class="warn">还差一个内存档位</div>'+
+        '<div class="muted">浏览器无法读取你的内存容量，请选择本机内存：</div>'+
+        '<div style="margin-top:10px">'+[8,16,24,32,36,48,64,96,128].map(function(s){return '<button class="mini" style="margin:2px" onclick="quickRam('+s+')">'+s+' GB</button>';}).join('')+'</div>'+
+        '<div class="muted" style="margin-top:8px">也可以到「硬件档案」粘贴本机探测结果，得到精确结果。</div>';
+      return;
+    }
+    document.getElementById('pick').innerHTML='<div class="warn">无自动推荐</div><div class="muted">'+esc(rec.reason)+'</div>';
+    return;
+  }
   var html='<div style="font-size:18px;font-weight:700">'+esc(p.name)+'</div>';
   html+='<div class="muted">'+esc(p.id)+' · '+esc(p.params_b)+'B · 质量 '+esc(p.quality)+'</div>';
   html+='<div>'+badge(p.quantization,'ok')+badge('零溢出','ok')+badge('窗口 '+p.planned_window)+badge('KV '+p.kv_quant)+(p.moe?badge('MoE'):'')+'</div>';
@@ -457,6 +492,7 @@ async function healthCheck(){
 document.getElementById('t-dep').addEventListener('change',onTestDepChange);
 (async function init(){
   try{CONFIG=await (await fetch('/api/backends')).json();}catch(e){CONFIG={};}
+  renderPresets();
   await runBrowserProbe();
   loadProbeCommand();
 })();
