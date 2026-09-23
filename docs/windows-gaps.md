@@ -21,6 +21,25 @@
 
 ---
 
+## 一补、修复状态
+
+已修 3 条（P0）+ 1 条顺带发现的 bug：
+
+| 编号 | 状态 | 修复方式 |
+|---|---|---|
+| A1 | 已修 | PROBE_SCRIPT 增加 Windows 分支：CIM 取内存（TotalPhysicalMemory）、注册表 REG_QWORD 取显存；分隔符用 chr(92) 拼接以免引入转义序列 |
+| A2 | 已修 | 平台名归一化：platform.system() 的 Windows → 输出 win32，与前端枚举一致 |
+| A3 | 已修 | probe_command 按平台分派：win32/windows → irm .../probe.ps1 \| iex，其余 → curl ... \| python3 - |
+| — | 已修 | **顺带发现的 bug**：/api/hardware/probe-command 把整个 User-Agent 当成平台名传入，导致分派永远不生效，所有系统都拿到 curl+python3 的命令。现在 ?platform= 优先，UA 仅作回退 |
+| A4 | 已修 | 新增 /api/hardware/probe.ps1 端点与 PROBE_SCRIPT_PS1（61 行，无需 Python） |
+
+测试：backend/tests/test_windows_probe.py 用假的 platform/subprocess 在任意系统上
+执行生成脚本，覆盖 Windows 分支的解析逻辑（内存、注册表显存、vendor、nvidia-smi 优先），
+外加端点分派与 PS1 结构断言。共 8 条。
+
+**仍未修**：B（probeWindows 的 iGPU/vendor 判定）、C（WSL2）、D（platform 枚举校验）、
+E（打包）、F（smoke 断言）。
+
 ## 二、缺口
 
 ### A. 手动探测脚本在 Windows 上完全不可用（P0）

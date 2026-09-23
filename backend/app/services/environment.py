@@ -27,9 +27,9 @@ def scan():
     docker=bool(shutil.which("docker")); wsl=bool(shutil.which("wsl"))
     checks=[{"name":"GPU","status":"PASS" if gpu else "WARNING","message":"检测到 Apple Silicon GPU，可使用统一内存" if apple_silicon else ("检测到 NVIDIA GPU" if gpu else "未检测到可用 GPU")},{"name":"Docker","status":"PASS" if docker else "UNKNOWN","message":"Docker 可用" if docker else "未安装 Docker"}]
     if apple_silicon:
-        checks += [{"name":"Metal","status":"PASS","message":"Apple Metal 可用；GPU 与 CPU 共用统一内存"},{"name":"CUDA","status":"NOT_APPLICABLE","message":"Apple Silicon 不使用 CUDA/nvidia-smi"}]
+        checks += [{"name":"Metal","status":"PASS","message":"Apple Metal 可用；GPU 与 CPU 共用统一内存"},{"name":"MLX","status":"UNKNOWN","message":"Apple Silicon 的高吞吐本地推理路径（pip install mlx-lm）"},{"name":"CUDA","status":"NOT_APPLICABLE","message":"Apple Silicon 不使用 CUDA/nvidia-smi"}]
     else: checks += [{"name":"WSL2","status":"PASS" if wsl else "UNKNOWN","message":"WSL 可用" if wsl else "未检测到 WSL"}]
-    return {"os":system,"architecture":architecture,"python":platform.python_version(),"cpu_cores":os.cpu_count(),"gpu":gpu,"apple_silicon":apple_silicon,"memory":{"total_gb":memory_total_gb,"type":"unified" if apple_silicon else "unknown"},"docker":{"installed":docker},"wsl2":{"installed":wsl},"recommended_backends":["ollama","transformers"] if apple_silicon else ["vllm","sglang","ollama","transformers"],"status":"PASS" if gpu else "WARNING","checks":checks}
+    return {"os":system,"architecture":architecture,"python":platform.python_version(),"cpu_cores":os.cpu_count(),"gpu":gpu,"apple_silicon":apple_silicon,"memory":{"total_gb":memory_total_gb,"type":"unified" if apple_silicon else "unknown"},"docker":{"installed":docker},"wsl2":{"installed":wsl},"recommended_backends":["ollama","mlx"] if apple_silicon else ["vllm","sglang","ollama","transformers"],"status":"PASS" if gpu else "WARNING","checks":checks}
 
 @router.post("/environment/scan")
 def environment_scan(): return scan()

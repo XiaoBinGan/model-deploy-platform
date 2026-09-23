@@ -44,7 +44,46 @@ Windows 特意避开 `Win32_VideoController.AdapterRAM`——它是 uint32，
 |---|---|
 | ollama | 缺模型先 `ollama pull`，再 `keep_alive` 常驻；停止时卸载 |
 | llama.cpp | 带本机硬件向控制面要规划，spawn `llama-server`，轮询 `/health` |
-| vLLM / SGLang | 明确 `BLOCKED`（面向 Linux 服务器） |
+| mlx | Apple Silicon 的高吞吐路径，见下 |
+| vLLM / SGLang | 明确 `BLOCKED`：vLLM 官方只发 manylinux 的 x86_64/aarch64 wheel，没有 macOS 版本，源码包依赖 CUDA/ROCm 内核 |
+| transformers | 控制面**有**实现（`app/runtimes/transformers_server.py`），但那个 runtime 模块在服务端代码里，桌面端本地跑不了，所以这里也是 BLOCKED |
+
+## MLX：Apple Silicon 上真正对标 vLLM 的东西
+
+在 Mac 上想要 vLLM 那种吞吐，对应的不是 vLLM，是 MLX。
+
+```bash
+python3 -m venv ~/.mdp-mlx
+~/.mdp-mlx/bin/pip install mlx-lm
+```
+
+**必须用 venv**：Homebrew 和多数发行版的 Python 都受 PEP 668 管控，
+直接 `pip install` 会被拒绝。桌面端探测顺序是
+`$MDP_MLX_PYTHON` → `~/.mdp-mlx/bin/python3` → `python3` → `python`，
+所以上面这个默认位置开箱即用；装在别处就设 `MDP_MLX_PYTHON`。
+
+装好后桌面端会自动探测到 `mlx` 后端（检查 `python3 -c "import mlx_lm"`）。
+启动命令等价于：
+
+```bash
+python3 -m mlx_lm.server --model mlx-community/Qwen3-8B-4bit \
+  --host 127.0.0.1 --port 8931 --kv-bits 8
+```
+
+两个设计点：
+
+- **模型用 `mlx-community` 的 4bit 权重**（HuggingFace 仓库 id，不是本地路径）
+- **`--kv-bits 8`** 对应项目一直承诺的 `q8_0` KV 量化。统一内存上，正是 KV 量化
+  让 64K 上下文变得负担得起——和 `plan_window()` 里「宁可量化，不砍上下文」同一条原则
+
+`mlx_lm.server` 提供 `/v1/chat/completions`、`/v1/models` 和 `/health`，
+所以健康检查和 OpenAI 兼容测试页都能直接用。
+
+不需要真装 mlx-lm 也能跑这条路径的测试：
+
+```bash
+node test-mlx.js
+```
 
 ## 路由
 

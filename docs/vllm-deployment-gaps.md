@@ -136,7 +136,19 @@ POST /api/deployments 对任何后端名都返回 200 和 id，
 | 4 | 已修 | 新增 DELETE /api/deployments/{id}（后端 + 桌面端 + 前端按钮），删除前先停止；列表从 22 条清到 6 条实测通过 |
 | 1 | 已修 | 前端 fillBackends() 按 /api/backends 过滤两个下拉，不可用的置灰并标注「本机未安装 / 桌面端不支持」；桌面端 /api/backends 改为只报告可部署的后端，另给 installed 字段说明已装但不可用的 |
 
-未修：2（transformers 后端未实现）、3（MLX 后端）、5（错误引导）、6（planner 平台判定）、7（创建时校验）。
+第二轮又修了 3 条：
+
+| 编号 | 状态 | 修复方式 |
+|---|---|---|
+| 3 | 已修 | **新增 MLX 后端**。mlx-lm 提供 OpenAI 兼容的 mlx_lm.server（/v1/chat/completions、/v1/models、/health）。desktop 新增 _runMlx()：平台必须是 darwin+arm64，检测装了 mlx_lm 的 python，命令 mlx_lm.server --model <HF repo> --host 127.0.0.1 --port <p> --kv-bits 8。--kv-bits 8 对应项目一直承诺的 q8_0 KV 量化，这是在统一内存上撑住 64K 上下文的办法。模型用 mlx-community 的 4bit 权重。 |
+| 2 | 已改设计 | transformers **在控制面里本来就实现了**（backend/app/runtimes/transformers_server.py + transformers_runtime.py + planner.py:149），但那个 runtime 模块在服务端代码里，桌面端本地跑不了——所以「桌面端不支持」这个判断本身没错，错的是 environment.py 把它列为 Apple Silicon 的推荐后端。已改为 recommended_backends: ["ollama","mlx"]，并新增 MLX 检查项。 |
+| — | 已修 | /api/hardware/probe-command 把 User-Agent 当平台名（见 windows-gaps.md） |
+
+MLX 后端不需要真装 mlx-lm 就能测：desktop/test-mlx.js 会造一个假的 python3
+（回应 import mlx_lm，并起一个真的 /health 服务），覆盖探测、启动、参数、
+健康检查、停止杀进程。10/10 通过。
+
+未修：5（错误引导）、6（planner 平台判定）、7（创建时校验）。
 
 ## 四、建议的处理顺序
 

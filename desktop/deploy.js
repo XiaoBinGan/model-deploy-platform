@@ -2,6 +2,7 @@
 
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const OLLAMA_BASE = "http://127.0.0.1:11434";
@@ -95,6 +96,11 @@ class Deployments {
     const installed = [];
     if (await reachable(OLLAMA_BASE + "/api/tags", 1500)) backends.push("ollama");
     if (await hasBinary("llama-server")) backends.push("llama.cpp");
+    // MLX is the only high-throughput path on Apple Silicon; vLLM has no macOS
+    // wheels at all.
+    if (process.platform === "darwin" && process.arch === "arm64" && (await this._mlxPython())) {
+      backends.push("mlx");
+    }
     if (await hasBinary("vllm")) installed.push("vllm");
     if (await hasBinary("sglang")) installed.push("sglang");
     // allow_remote_deploy is always true here: in the desktop app every
@@ -200,8 +206,116 @@ class Deployments {
   async _run(item, gen) {
     if (item.backend === "ollama") return this._runOllama(item, gen);
     if (item.backend === "llama.cpp" || item.backend === "llamacpp") return this._runLlama(item, gen);
+    if (item.backend === "mlx") return this._runMlx(item, gen);
     item.status = "BLOCKED";
-    this._log(item, item.backend + " 在桌面端不支持：它面向 Linux 服务器，请改用 ollama 或 llama.cpp。");
+    this._log(item, item.backend + " 在桌面端不支持。本机可用：ollama、llama.cpp" +
+      (process.platform === "darwin" && process.arch === "arm64" ? "、mlx" : "") + "。");
+    this._save();
+  }
+
+  // MLX is the Apple Silicon equivalent of vLLM: it drives the GPU through
+  // Metal and is the only high-throughput local path on this platform. vLLM
+  // itself ships no macOS wheels, so offering it here only ever failed.
+  _mlxPython() {
+    // Homebrew and most distro Pythons are PEP 668 "externally managed", so
+    // mlx-lm normally lands in a venv rather than the system interpreter.
+    // Checking only PATH would miss exactly the install this app recommends.
+    const home = os.homedir();
+    const candidates = [
+      process.env.MDP_MLX_PYTHON,
+      path.join(home, ".mdp-mlx", "bin", "python3"),
+      path.join(home, ".mdp-mlx", "bin", "python"),
+      "python3",
+      "python",
+    ].filter(Boolean);
+    return candidates.reduce(async (prev, name) => {
+      const found = await prev;
+      if (found) return found;
+      const ok = await new Promise((resolve) => {
+        execFile(name, ["-c", "import mlx_lm"], { timeout: 20000 }, (err) => resolve(!err));
+      });
+      return ok ? name : null;
+    }, Promise.resolve(null));
+  }
+
+  async _runMlx(item, gen) {
+    if (process.platform !== "darwin" || process.arch !== "arm64") {
+      item.status = "BLOCKED";
+      this._log(item, "MLX 需要 Apple Silicon（macOS + arm64），本机是 " +
+        process.platform + "/" + process.arch + "。");
+      this._save();
+      return;
+    }
+    const python = await this._mlxPython();
+    if (this._stale(item, gen)) return;
+    if (!python) {
+      item.status = "FAILED";
+      // Homebrew 和多数发行版的 Python 都受 PEP 668 管控，直接 pip install 会被拒，
+      // 所以给的是 venv 方案——探测顺序也覆盖了这个默认位置。
+      this._log(item, "没有找到装了 mlx-lm 的 Python。安装（需要 venv，系统 Python 通常被 PEP 668 管控）：");
+      this._log(item, "  python3 -m venv ~/.mdp-mlx && ~/.mdp-mlx/bin/pip install mlx-lm");
+      this._log(item, "模型用 mlx-community 的权重，例如 mlx-community/Qwen3-8B-4bit。");
+      this._log(item, "装在别处的话设 MDP_MLX_PYTHON 指向那个解释器。");
+      this._save();
+      return;
+    }
+
+    const cmd = [python, "-m", "mlx_lm.server",
+      "--model", item.model_path,
+      "--host", "127.0.0.1",
+      "--port", String(item.port)];
+    // 64K context is the floor this project promises, and KV quantization is
+    // what makes it affordable on unified memory. mlx-lm takes bits, not a
+    // quant name, so q8_0 maps to 8. kv_bits === 0 disables it.
+    if (item.kv_bits !== 0) cmd.push("--kv-bits", String(item.kv_bits || 8));
+    item.command = cmd;
+    this._log(item, "命令：" + cmd.join(" "));
+
+    let proc;
+    try {
+      proc = spawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      item.status = "FAILED";
+      this._log(item, "无法启动 mlx_lm.server：" + e.message);
+      this._save();
+      return;
+    }
+    this.procs.set(item.id, { proc, kind: "server" });
+    item.pid = proc.pid;
+
+    const onData = (buf) => {
+      const text = String(buf).replace(/\r/g, "").trim();
+      if (text) this._log(item, text.split("\n").pop());
+    };
+    proc.stdout.on("data", onData);
+    proc.stderr.on("data", onData);
+    proc.on("error", (e) => {
+      item.status = "FAILED";
+      this._log(item, "无法启动 mlx_lm.server：" + e.message);
+      this._save();
+    });
+    proc.on("close", (code) => {
+      const cur = this.procs.get(item.id);
+      if (cur && cur.proc === proc) this.procs.delete(item.id);
+      if (this._stale(item, gen)) return;
+      item.pid = null;
+      if (item.status !== "STOPPED") {
+        item.status = code === 0 ? "STOPPED" : "FAILED";
+        this._log(item, "mlx_lm.server 退出，code=" + code);
+      }
+      this._save();
+    });
+
+    const healthy = await this._waitHealthy(item, START_TIMEOUT_S, gen);
+    if (this._stale(item, gen)) return;
+    if (healthy) {
+      item.status = "RUNNING";
+      this._log(item, "mlx_lm.server 就绪：" + item.endpoint);
+    } else if (item.status === "STARTING") {
+      item.status = "FAILED";
+      this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s），已终止进程");
+      await this._kill(proc, STOP_GRACE_MS);
+    }
     this._save();
   }
 

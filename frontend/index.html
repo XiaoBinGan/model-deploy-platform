@@ -287,7 +287,8 @@ async function parseCode(){
 }
 async function loadProbeCommand(){
   try{
-    var d=await (await fetch('/api/hardware/probe-command')).json();
+    var plat=(typeof PROFILE!=='undefined'&&PROFILE&&PROFILE.platform)||'';
+    var d=await (await fetch('/api/hardware/probe-command?platform='+encodeURIComponent(plat))).json();
     document.getElementById('pf-cmd').textContent=d.command;
   }catch(e){}
 }
@@ -411,7 +412,7 @@ function fillDeployModels(rec){
 // Both backend dropdowns were hardcoded to the full list, so an unavailable
 // backend could be picked and the deployment only failed at start. The data was
 // already being fetched into CONFIG; this is what uses it.
-var ALL_BACKENDS=['ollama','llama.cpp','transformers','vllm','sglang'];
+var ALL_BACKENDS=['ollama','llama.cpp','mlx','transformers','vllm','sglang'];
 function backendNote(b,available,installed){
   if(!available||available.indexOf(b)>=0){return '';}
   if(installed&&installed.indexOf(b)>=0){return ' · 桌面端不支持';}

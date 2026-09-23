@@ -175,11 +175,22 @@ def hardware_profile_code(req: ProfileCodeRequest):
 def hardware_probe_script():
     return PlainTextResponse(profiles.probe_script(), media_type="text/x-python")
 
+@app.get("/api/hardware/probe.ps1", response_class=PlainTextResponse)
+def hardware_probe_ps1():
+    return PlainTextResponse(profiles.probe_script_ps1(), media_type="text/plain")
+
 @app.get("/api/hardware/probe-command")
-def hardware_probe_command(request: Request):
+def hardware_probe_command(request: Request, platform: str = ""):
+    # This used to pass the whole user-agent string as the platform name, so the
+    # per-platform dispatch never fired and every OS got the curl+python3
+    # command. An explicit ?platform= wins; the UA is only a fallback.
+    ua = request.headers.get("user-agent", "").lower()
+    hint = (platform or "").strip()
+    if not hint:
+        hint = "win32" if "windows" in ua else ""
     return {
-        "command": profiles.probe_command(_base_url(request)),
-        "platform": request.headers.get("user-agent", ""),
+        "command": profiles.probe_command(_base_url(request), hint),
+        "platform": hint or "unknown",
         "note": "在本机执行后把 JSON 或档案码粘回页面",
     }
 
