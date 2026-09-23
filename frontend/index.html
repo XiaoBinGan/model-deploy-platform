@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ModelForge</title>
 <style>
-:root{--bg:#0b0d10;--surface:#12161b;--raised:#181e25;--border:#252d37;--text:#e8edf3;--muted:#8b96a5;--primary:#8290ff;--ok:#32d583;--warn:#fdb022;--danger:#f97066}
+:root{--bg:#0b0d10;--surface:#12161b;--raised:#181e25;--border:#252d37;--text:#e8edf3;--muted:#8b96a5;--primary:#8290ff;--ok:#32d583;--warn:#fdb022;--danger:#f97066;--pad:24px}
 *{box-sizing:border-box}
-html,body{background:var(--bg)}
-body{margin:0;color:var(--text);font:14px/1.6 Inter,system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
-main{max-width:900px;margin:0 auto;padding:20px 24px 64px}
+html,body{background:var(--bg);height:100%}
+body{margin:0;color:var(--text);font:14px/1.6 Inter,system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;min-height:100%;display:flex;flex-direction:column}
+main{flex:1;width:100%;max-width:1440px;margin:0 auto;padding:20px var(--pad) 48px}
 a{color:var(--primary)}
 h2{font-size:15px;font-weight:700;margin:0}
 button{border:1px solid var(--border);background:var(--raised);color:var(--text);padding:8px 13px;border-radius:8px;cursor:pointer;font-size:13px}
@@ -34,7 +34,7 @@ select{cursor:pointer}
 .card .head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .card .head select{width:auto;padding:6px 9px}
 .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
-.form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 .field{min-width:0}
 .field.wide{grid-column:1/-1}
 .field label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}
@@ -47,9 +47,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:var(--muted);font-weight:600;padding:7px 6px;border-bottom:1px solid var(--border)}
 td{padding:9px 6px;border-bottom:1px solid #1b222a;vertical-align:top}
 tr.spill{opacity:.62}
-.log{font:12px/1.85 ui-monospace,SFMono-Regular,monospace;color:#aeb8c5;background:#0a0d10;border:1px solid var(--border);border-radius:8px;padding:11px;white-space:pre-wrap;word-break:break-word;margin:0}
+.log{font:12px/1.85 ui-monospace,SFMono-Regular,monospace;color:#aeb8c5;background:#0a0d10;border:1px solid var(--border);border-radius:8px;padding:11px;white-space:pre-wrap;word-break:break-word;margin:0;max-height:min(48vh,460px);overflow:auto}
 .reply{background:#0f1a14;border:1px solid #1f3b2c;border-radius:8px;padding:11px;margin-top:10px;white-space:pre-wrap}
-pre{white-space:pre-wrap;background:#0a0d10;border:1px solid var(--border);padding:12px;border-radius:8px;color:#b9c2ff;font-size:12px;word-break:break-all;margin:0}
+pre{white-space:pre-wrap;background:#0a0d10;border:1px solid var(--border);padding:12px;border-radius:8px;color:#b9c2ff;font-size:12px;word-break:break-all;margin:0;max-height:min(38vh,360px);overflow:auto}
 .advisory{border:1px solid #5c4718;background:#221a0c;border-radius:8px;padding:12px;margin-bottom:12px}
 details.card>summary{cursor:pointer;color:var(--muted);font-size:13px;list-style:none;user-select:none}
 details.card>summary::-webkit-details-marker{display:none}
@@ -57,8 +57,10 @@ details.card>summary:before{content:"\25B8  ";color:var(--primary)}
 details.card[open]>summary:before{content:"\25BE  "}
 details.card>summary:hover{color:var(--text)}
 details.card[open]>summary{margin-bottom:12px}
-@media(max-width:760px){main{padding:16px}.hw,.form{grid-template-columns:1fr 1fr}}
-@media(max-width:520px){.hw,.form{grid-template-columns:1fr}}
+@media(max-width:760px){:root{--pad:16px}}
+/* 四个格子是固定数量，所以显式给 4 / 2x2 / 1；交给 auto-fit 会在 720px 断成 3+1 */
+@media(max-width:900px){.hw{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:420px){.hw{grid-template-columns:1fr}}
 </style></head>
 <body><main>
 
