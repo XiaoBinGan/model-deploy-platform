@@ -84,6 +84,27 @@ async function handle(req, res) {
     return send(res, 200, JSON.stringify(await deploys.detectBackends()));
   }
 
+  // Install a backend on THIS machine. Streamed over SSE so the user watches
+  // each command run, rather than a spinner over something that is modifying
+  // their computer.
+  if (parts[0] === "api" && parts[1] === "backends" && parts[2] && parts[3] === "install") {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    try {
+      await deploys.installStream(decodeURIComponent(parts[2]), res);
+    } catch (e) {
+      res.write("data: " + JSON.stringify({
+        type: "error",
+        reason: String((e && e.message) || e),
+      }) + "\n\n");
+      res.end();
+    }
+    return undefined;
+  }
+
   // --- deployments run HERE, on the user machine, not on the control plane ---
   if (parts[0] === "api" && parts[1] === "deployments") {
     const id = parts[2];

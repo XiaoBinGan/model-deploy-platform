@@ -4,6 +4,7 @@ const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { installPlan, BACKEND_INFO } = require("./installers");
 
 const OLLAMA_BASE = "http://127.0.0.1:11434";
 const OLLAMA_PORT = 11434;
@@ -22,6 +23,14 @@ const MIN_WINDOW = 1024;
 const MAX_WINDOW = 1048576;
 const MIN_PORT = 1024;
 const MAX_PORT = 65535;
+
+// Every backend the UI can show, so the ones this machine cannot run still get
+// an explanation instead of vanishing from the list.
+const ALL_BACKENDS = ["ollama", "llama.cpp", "mlx", "transformers", "vllm", "sglang"];
+
+// An install downloads a lot and can compile; 30 minutes is the same budget a
+// model pull gets.
+const INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
 
 function nowIso() {
   return new Date().toISOString().replace(/[.][0-9]{3}Z$/, "Z");
@@ -133,9 +142,124 @@ class Deployments {
     }
     if (await hasBinary("vllm")) installed.push("vllm");
     if (await hasBinary("sglang")) installed.push("sglang");
+
+    // For everything this app cannot start, work out whether it *could* be
+    // installed here and what that would run. Greying an entry out and stopping
+    // there leaves the user with no way forward; this is what the UI needs to
+    // offer one.
+    const installable = {};
+    const unavailable = {};
+    for (const name of ALL_BACKENDS) {
+      if (backends.indexOf(name) >= 0) continue;
+      const plan = await installPlan(name, this._installCtx());
+      const info = BACKEND_INFO[name] || "";
+      if (plan.ok) {
+        installable[name] = {
+          info,
+          steps: plan.steps.map((s) => s.note),
+          manual: plan.manual,
+        };
+      } else {
+        unavailable[name] = { info, reason: plan.reason, manual: plan.manual };
+      }
+    }
+
     // allow_remote_deploy is always true here: in the desktop app every
     // deployment is local by definition.
-    return { backends, installed, allow_remote_deploy: true, local: true };
+    return { backends, installed, installable, unavailable, allow_remote_deploy: true, local: true };
+  }
+
+  _installCtx() {
+    return {
+      platform: process.platform,
+      arch: process.arch,
+      home: os.homedir(),
+      has: hasBinary,
+    };
+  }
+
+  // Streams an install over SSE. The plan is rebuilt locally from the backend
+  // name - never accepted from the caller - for the same reason the launch argv
+  // is (see _plan): this runs real commands on the user's machine.
+  async installStream(name, res) {
+    const emit = (event) => {
+      try {
+        res.write("data: " + JSON.stringify(event) + "\n\n");
+      } catch (e) {
+        // The window went away mid-install; the steps still finish.
+      }
+    };
+
+    if (ALL_BACKENDS.indexOf(name) < 0) {
+      emit({ type: "error", reason: "不认识这个后端：" + name });
+      return res.end();
+    }
+
+    const plan = await installPlan(name, this._installCtx());
+    if (!plan.ok) {
+      emit({ type: "error", reason: plan.reason, manual: plan.manual });
+      return res.end();
+    }
+
+    emit({ type: "plan", backend: name, steps: plan.steps.map((s) => s.note), manual: plan.manual });
+    for (let i = 0; i < plan.steps.length; i += 1) {
+      const step = plan.steps[i];
+      emit({ type: "step", index: i, note: step.note, command: step.argv.join(" ") });
+      const code = await this._runInstallStep(step, (line) => emit({ type: "output", index: i, line }));
+      if (code !== 0) {
+        emit({ type: "done", ok: false, failedIndex: i, code });
+        return res.end();
+      }
+    }
+
+    // Re-probe so the entry turns selectable without a manual refresh.
+    const after = await this.detectBackends();
+    emit({ type: "done", ok: true, backends: after.backends, installable: after.installable });
+    res.end();
+  }
+
+  _runInstallStep(step, onLine) {
+    return new Promise((resolve) => {
+      let proc;
+      try {
+        proc = spawn(step.argv[0], step.argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+      } catch (e) {
+        onLine("无法启动 " + step.argv[0] + "：" + e.message);
+        return resolve(-1);
+      }
+      // Track it so quitting the app does not leave a half-finished install
+      // holding the terminal.
+      const key = "install:" + step.argv[0];
+      this.procs.set(key, { proc, kind: "install" });
+      let settled = false;
+      const finish = (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const cur = this.procs.get(key);
+        if (cur && cur.proc === proc) this.procs.delete(key);
+        resolve(code);
+      };
+      const timer = setTimeout(async () => {
+        onLine("超过 " + INSTALL_TIMEOUT_MS / 60000 + " 分钟，已终止");
+        await this._kill(proc, 3000);
+        finish(-1);
+      }, INSTALL_TIMEOUT_MS);
+
+      const onData = (buf) => {
+        String(buf).replace(/\r/g, "").split("\n").forEach((line) => {
+          const text = line.trim();
+          if (text) onLine(text.slice(0, 300));
+        });
+      };
+      proc.stdout.on("data", onData);
+      proc.stderr.on("data", onData);
+      proc.on("error", (e) => {
+        onLine(String(e.message));
+        finish(-1);
+      });
+      proc.on("close", (code) => finish(code === null ? -1 : code));
+    });
   }
 
   create(req) {

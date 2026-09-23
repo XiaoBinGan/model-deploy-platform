@@ -57,6 +57,16 @@ details.card>summary:before{content:"\25B8  ";color:var(--primary)}
 details.card[open]>summary:before{content:"\25BE  "}
 details.card>summary:hover{color:var(--text)}
 details.card[open]>summary{margin-bottom:12px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.66);display:flex;align-items:center;justify-content:center;padding:var(--pad);z-index:50}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;width:100%;max-width:660px;max-height:88vh;overflow:auto}
+.modal .head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.modal h2{font-size:15px}
+.mline{margin:9px 0;font-size:13px}
+.mline .k{color:var(--muted);font-size:12px;margin-right:6px}
+.stepline{display:flex;gap:9px;align-items:baseline;padding:6px 0;font-size:13px;border-bottom:1px solid #1b222a}
+.stepline .n{color:var(--muted);font-size:11px;flex:none;width:18px;text-align:right}
+.stepline .c{color:var(--muted);font:11px/1.6 ui-monospace,SFMono-Regular,monospace;word-break:break-all;margin-top:2px}
+.step-run{color:var(--warn)}.step-done{color:var(--ok)}.step-fail{color:var(--danger)}
 @media(max-width:760px){:root{--pad:16px}}
 /* 四个格子是固定数量，所以显式给 4 / 2x2 / 1；交给 auto-fit 会在 720px 断成 3+1 */
 @media(max-width:900px){.hw{grid-template-columns:repeat(2,1fr)}}
@@ -81,6 +91,7 @@ details.card[open]>summary{margin-bottom:12px}
 <section class="card">
   <div class="head">
     <h2>推荐模型</h2>
+    <span class="muted" id="backend-hint" style="font-size:12px"></span>
     <select id="backend" onchange="refresh()" style="margin-left:auto;width:auto">
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option>
@@ -172,6 +183,19 @@ details.card[open]>summary{margin-bottom:12px}
   <div class="muted" style="font-size:12px;margin:12px 0 5px">原始报告</div>
   <pre id="raw-env">—</pre>
 </details>
+
+<div id="modal" class="modal-bg" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="head">
+      <h2 id="m-title">安装后端</h2>
+      <span class="grow"></span>
+      <button class="mini" onclick="closeModal()">关闭</button>
+    </div>
+    <div id="m-body"></div>
+    <div class="actions" id="m-actions"></div>
+    <div id="m-log" class="log" style="display:none;margin-top:12px;max-height:min(30vh,280px)"></div>
+  </div>
+</div>
 
 </main>
 <script>
@@ -415,29 +439,170 @@ function fillDeployModels(rec){
 // backend could be picked and the deployment only failed at start. The data was
 // already being fetched into CONFIG; this is what uses it.
 var ALL_BACKENDS=['ollama','llama.cpp','mlx','transformers','vllm','sglang'];
-function backendNote(b,available,installed){
-  if(!available||available.indexOf(b)>=0){return '';}
-  if(installed&&installed.indexOf(b)>=0){return ' · 桌面端不支持';}
-  return ' · 本机未安装';
+
+// What this machine can do about one backend, from the desktop's own probe.
+// 'installable' means there is a command that would fix it; 'unavailable' means
+// there is not, and saying so is the honest answer rather than offering a button
+// that cannot work.
+function backendStatus(b){
+  var avail=(CONFIG&&CONFIG.backends)||[];
+  if(avail.indexOf(b)>=0){return {kind:'ready'};}
+  var inst=(CONFIG&&CONFIG.installable)||{};
+  if(inst[b]){return {kind:'installable',data:inst[b]};}
+  var un=(CONFIG&&CONFIG.unavailable)||{};
+  if(un[b]){return {kind:'unavailable',data:un[b]};}
+  return {kind:'unknown'};
 }
+
+function backendNote(b){
+  var st=backendStatus(b);
+  if(st.kind==='ready'){return '';}
+  if(st.kind==='installable'){return ' · 未安装，可一键安装';}
+  return ' · 本机装不了';
+}
+
 function fillBackends(){
   var available=(CONFIG&&CONFIG.backends&&CONFIG.backends.length)?CONFIG.backends:null;
-  var installed=(CONFIG&&CONFIG.installed)||[];
   ['backend','d-backend'].forEach(function(id){
     var sel=document.getElementById(id);
     if(!sel){return;}
     var current=sel.value;
     sel.innerHTML=ALL_BACKENDS.map(function(b){
       var ok=!available||available.indexOf(b)>=0;
-      return '<option value="'+b+'"'+(ok?'':' disabled')+'>'+b+backendNote(b,available,installed)+'</option>';
+      return '<option value="'+esc(b)+'"'+(ok?'':' data-needs-install="1"')+'>'+
+        esc(b)+esc(backendNote(b))+'</option>';
     }).join('');
-    // Keep the previous choice when it is still selectable, otherwise fall to
-    // the first backend that actually works.
+    // Keep the previous choice when it still works, otherwise fall to the first
+    // backend that does. A needs-install entry is never left selected.
     var want=sel.querySelector('option[value="'+current+'"]');
-    if(want&&!want.disabled){sel.selectedIndex=want.index;return;}
-    var first=sel.querySelector('option:not([disabled])');
-    if(first){sel.selectedIndex=first.index;}
+    if(want&&!want.hasAttribute('data-needs-install')){sel.selectedIndex=want.index;}
+    else{var good=sel.querySelector('option:not([data-needs-install])');if(good){sel.selectedIndex=good.index;}}
+    if(!sel.getAttribute('data-bound')){
+      sel.setAttribute('data-bound','1');
+      sel.addEventListener('change',function(){
+        var chosen=sel.value;
+        var opt=sel.querySelector('option[value="'+chosen+'"]');
+        if(!opt||!opt.hasAttribute('data-needs-install')){return;}
+        // Revert immediately: the select must never rest on a backend this
+        // machine cannot run, and the modal is where the user acts instead.
+        var good=sel.querySelector('option:not([data-needs-install])');
+        if(good){sel.selectedIndex=good.index;}
+        openInstallModal(chosen);
+      });
+    }
   });
+  var hint=document.getElementById('backend-hint');
+  if(hint){
+    var missing=ALL_BACKENDS.filter(function(b){return backendStatus(b).kind!=='ready';});
+    hint.textContent=missing.length?'下拉里带「未安装」的项可以直接点，会告诉你缺什么、能不能装':' ';
+  }
+}
+
+// --- 后端安装 ---------------------------------------------------------------
+// An unavailable backend used to be `disabled`, which made it unclickable and
+// left the user staring at a note with nothing to do about it. It stays
+// selectable now: picking one reverts the select and opens this.
+var INSTALL_ES=null;
+var MODAL_MANUAL='';
+
+function closeModal(){
+  if(INSTALL_ES){INSTALL_ES.close();INSTALL_ES=null;}
+  document.getElementById('modal').style.display='none';
+}
+
+function copyModalCommand(){
+  var btn=document.getElementById('m-copy');
+  navigator.clipboard.writeText(MODAL_MANUAL).then(function(){
+    if(!btn){return;}
+    btn.textContent='已复制';
+    setTimeout(function(){btn.textContent='复制命令';},1200);
+  });
+}
+
+function openInstallModal(b){
+  var st=backendStatus(b);
+  var info=(st.data&&st.data.info)||'';
+  document.getElementById('m-title').textContent='后端 · '+b;
+  var body=document.getElementById('m-body');
+  var actions=document.getElementById('m-actions');
+  var log=document.getElementById('m-log');
+  log.style.display='none';log.textContent='';
+  actions.innerHTML='';
+  MODAL_MANUAL='';
+  document.getElementById('modal').style.display='flex';
+
+  var html='<div class="mline muted">'+esc(info)+'</div>';
+  if(st.kind==='ready'){
+    body.innerHTML=html+'<div class="mline ok">这个后端已经可用，直接在部署表单里选它就行。</div>';
+    return;
+  }
+  if(st.kind==='installable'){
+    var d=st.data;
+    MODAL_MANUAL=d.manual||'';
+    html+='<div class="mline"><span class="k">状态</span><span class="warn">本机未安装</span></div>';
+    html+='<div class="mline"><span class="k">将要执行</span></div>';
+    html+=(d.steps||[]).map(function(s,i){
+      return '<div class="stepline"><span class="n">'+(i+1)+'</span><span>'+esc(s)+'</span></div>';
+    }).join('');
+    html+='<div class="mline" style="margin-top:12px"><span class="k">等价命令</span></div>';
+    html+='<pre>'+esc(d.manual||'')+'</pre>';
+    body.innerHTML=html;
+    actions.innerHTML='<button class="primary" id="m-install">确认安装</button>'+
+      '<button class="mini" id="m-copy">复制命令</button>';
+    document.getElementById('m-install').onclick=function(){runInstall(b);};
+    document.getElementById('m-copy').onclick=copyModalCommand;
+    return;
+  }
+  // The control plane cannot install anything - only the desktop app can, since
+  // only it runs on the user's machine. Saying "unrecognised" there would be
+  // wrong and would hide the actual way forward.
+  var reason=(st.data&&st.data.reason)||((CONFIG&&CONFIG.local===true)
+    ? '桌面端不认识这个后端。'
+    : '这里是浏览器直连控制面，装不了东西。用桌面端打开同一个地址，它能在本机检测并安装。');
+  var ref=(st.data&&st.data.manual)||'';
+  html+='<div class="mline"><span class="k">状态</span><span class="bad">本机装不了</span></div>';
+  html+='<div class="mline">'+esc(reason)+'</div>';
+  if(ref){html+='<div class="mline" style="margin-top:12px"><span class="k">参考</span></div><pre>'+esc(ref)+'</pre>';}
+  body.innerHTML=html;
+}
+
+function runInstall(b){
+  var actions=document.getElementById('m-actions');
+  var log=document.getElementById('m-log');
+  log.style.display='block';log.textContent='';
+  actions.innerHTML='<span class="muted">正在安装，请不要关闭窗口…</span>';
+  var append=function(line){log.textContent+=(log.textContent?'\n':'')+line;log.scrollTop=log.scrollHeight;};
+  var finish=function(html){if(INSTALL_ES){INSTALL_ES.close();INSTALL_ES=null;}actions.innerHTML=html;};
+  if(INSTALL_ES){INSTALL_ES.close();}
+  INSTALL_ES=new EventSource('/api/backends/'+encodeURIComponent(b)+'/install');
+  INSTALL_ES.onmessage=function(ev){
+    var m;try{m=JSON.parse(ev.data);}catch(e){return;}
+    if(m.type==='plan'){append('开始安装 '+b+'，共 '+(m.steps||[]).length+' 步');}
+    else if(m.type==='step'){append('');append('['+(m.index+1)+'] '+m.note);append('    $ '+m.command);}
+    else if(m.type==='output'){append('    '+m.line);}
+    else if(m.type==='error'){
+      append('');append('装不了：'+m.reason);
+      if(m.manual){append('参考：'+m.manual);}
+      finish('<button class="mini" id="m-close2">关闭</button>');
+      document.getElementById('m-close2').onclick=closeModal;
+    }
+    else if(m.type==='done'){
+      if(m.ok){
+        append('');append('安装完成。');
+        finish('<button class="primary" id="m-refresh">刷新并关闭</button>');
+        document.getElementById('m-refresh').onclick=function(){closeModal();refresh();};
+      }else{
+        append('');append('第 '+(m.failedIndex+1)+' 步失败（退出码 '+m.code+'）。');
+        finish('<button class="mini" id="m-close3">关闭</button>');
+        document.getElementById('m-close3').onclick=closeModal;
+      }
+    }
+  };
+  INSTALL_ES.onerror=function(){
+    append('');append('连接中断。安装可能仍在后台继续，可以点「重新检测」看结果。');
+    finish('<button class="mini" id="m-close4">关闭</button>');
+    document.getElementById('m-close4').onclick=closeModal;
+  };
 }
 function currentModel(){
   var sel=document.getElementById('d-model');

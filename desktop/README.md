@@ -87,6 +87,36 @@ Windows 特意避开 `Win32_VideoController.AdapterRAM`——它是 uint32，
 | vLLM / SGLang | 明确 `BLOCKED`：vLLM 官方只发 manylinux 的 x86_64/aarch64 wheel，没有 macOS 版本，源码包依赖 CUDA/ROCm 内核 |
 | transformers | 控制面**有**实现（`app/runtimes/transformers_server.py`），但那个 runtime 模块在服务端代码里，桌面端本地跑不了，所以这里也是 BLOCKED |
 
+### 缺的后端可以直接点着装
+
+下拉里不可用的后端**不是禁用的**，点一下会弹框说明缺什么，能装的话给一个「确认安装」。
+
+禁用一个 `<option>` 看起来更安全，但浏览器不会给禁用的选项发点击事件，用户只能盯着
+「本机未安装」四个字，没有任何出路。
+
+点击后下拉立刻回退到可用的后端，再弹框——所以下拉永远不会停在一个跑不了的后端上。
+
+弹框分三种：
+
+| 情况 | 表现 |
+|---|---|
+| 可安装 | 列出将要执行的每一步 + 等价命令，给「确认安装」和「复制命令」 |
+| 本机装不了 | 只说原因，**不给安装按钮** |
+| 浏览器直连控制面 | 说明安装只能在桌面端做（只有桌面端跑在用户机器上） |
+
+**为什么有些后端不给安装按钮**：vLLM / SGLang 官方只发 manylinux 的 x86_64 / aarch64
+wheel，没有 macOS 版本；transformers 的 runtime 在服务端代码里。给一个点了必然失败的
+按钮，比直接说清楚更糟。
+
+安装过程用 **SSE 流式输出**，每一步的命令和输出都实时显示——让用户看见自己机器上在发生
+什么，这是「帮你装」能被接受的前提。命令**本地构造**（同 argv 那条规则），
+每一步是 argv 数组、不经过 shell。
+
+```bash
+node test-install.js        # 安装计划与 SSE 管道（不会真装东西）
+npm run test:ui             # 真窗口里点下拉、验证弹框与回退
+```
+
 ### 控制面是提示源，不是命令源
 
 llama.cpp 那条会向控制面要规划，而 `/api/plans/preview` 返回的是一个**拼好的 argv**。
