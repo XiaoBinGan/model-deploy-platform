@@ -160,7 +160,7 @@ class Deployments {
           manual: plan.manual,
         };
       } else {
-        unavailable[name] = { info, reason: plan.reason, manual: plan.manual };
+        unavailable[name] = { info, reason: plan.reason, manual: plan.manual, kind: plan.kind };
       }
     }
 

@@ -30,6 +30,7 @@ const PROBE = `(() => {
   return {
     total: opts.length,
     needs: needs.map((o) => o.value),
+    labels: Object.fromEntries(opts.map((o) => [o.value, o.textContent])),
     ready: opts.filter((o) => !o.hasAttribute("data-needs-install")).map((o) => o.value),
     anyDisabled: opts.some((o) => o.disabled),
     selected: sel.value,
@@ -82,6 +83,17 @@ app.whenReady().then(async () => {
   check("初始没有弹框", base.modalOpen === false);
   console.log("        （" + (base.local ? "桌面端" : "控制面直连") + "模式）");
 
+  // Two different kinds of unavailable must read differently in the dropdown.
+  // Only the desktop app knows the difference: the control plane reports what it
+  // can run, not what this machine could install.
+  if (base.local && base.needs.indexOf("transformers") >= 0 && base.needs.indexOf("vllm") >= 0) {
+    check("transformers 说的是「桌面端跑不了」",
+      base.labels.transformers.indexOf("桌面端跑不了") >= 0, base.labels.transformers);
+    check("vllm 说的是「本机装不了」",
+      base.labels.vllm.indexOf("本机装不了") >= 0, base.labels.vllm);
+    check("两者文案确实不同", base.labels.transformers !== base.labels.vllm);
+  }
+
   // Only the desktop app can install, so only there is there a plan to offer.
   const inst = base.local
     ? base.needs.filter((n) => n !== "vllm" && n !== "sglang" && n !== "transformers")
@@ -114,7 +126,16 @@ app.whenReady().then(async () => {
   if (blocked.length) {
     const r = await win.webContents.executeJavaScript(PICK(blocked[0]));
     check("点装不了的项：" + blocked[0] + " 也打开弹框说明原因", r.modalOpen === true);
-    check("说明里给出为什么装不了", r.body.indexOf("本机装不了") >= 0, r.body.slice(0, 80));
+    // The label must match the reason: a server-side runtime is not something
+    // the user can install their way out of.
+    if (base.local) {
+      const wantLabel = blocked[0] === "transformers" ? "桌面端跑不了" : "本机装不了";
+      check("弹框里的状态标签与原因一致", r.body.indexOf(wantLabel) >= 0,
+        "期望「" + wantLabel + "」，实际 " + r.body.slice(0, 60));
+      if (blocked[0] === "transformers") {
+        check("说清楚装什么都解决不了", r.body.indexOf("装什么都解决不了") >= 0);
+      }
+    }
     check("没有「确认安装」按钮（装不了就不该给按钮）", r.installBtn === false, r.actions);
     check("下拉同样回退", base.ready.indexOf(r.selectedAfter) >= 0, r.selectedAfter);
     await win.webContents.executeJavaScript("closeModal()");

@@ -458,6 +458,9 @@ function backendNote(b){
   var st=backendStatus(b);
   if(st.kind==='ready'){return '';}
   if(st.kind==='installable'){return ' · 未安装，可一键安装';}
+  // "Cannot be installed here" and "this app cannot run it" are different
+  // answers, and the second one is not fixed by installing anything.
+  if(st.data&&st.data.kind==='runtime'){return ' · 桌面端跑不了';}
   return ' · 本机装不了';
 }
 
@@ -556,11 +559,16 @@ function openInstallModal(b){
   // The control plane cannot install anything - only the desktop app can, since
   // only it runs on the user's machine. Saying "unrecognised" there would be
   // wrong and would hide the actual way forward.
+  var isRuntime=!!(st.data&&st.data.kind==='runtime');
   var reason=(st.data&&st.data.reason)||((CONFIG&&CONFIG.local===true)
     ? '桌面端不认识这个后端。'
     : '这里是浏览器直连控制面，装不了东西。用桌面端打开同一个地址，它能在本机检测并安装。');
   var ref=(st.data&&st.data.manual)||'';
-  html+='<div class="mline"><span class="k">状态</span><span class="bad">本机装不了</span></div>';
+  html+='<div class="mline"><span class="k">状态</span><span class="bad">'+
+    (isRuntime?'桌面端跑不了':'本机装不了')+'</span></div>';
+  if(isRuntime){
+    html+='<div class="mline muted">不是没装的问题——装什么都解决不了，换台机器（控制面所在的那台）才行。</div>';
+  }
   html+='<div class="mline">'+esc(reason)+'</div>';
   if(ref){html+='<div class="mline" style="margin-top:12px"><span class="k">参考</span></div><pre>'+esc(ref)+'</pre>';}
   body.innerHTML=html;

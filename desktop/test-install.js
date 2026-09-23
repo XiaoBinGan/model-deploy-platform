@@ -54,6 +54,14 @@ const allTools = () => Promise.resolve(true);
   check("transformers 在哪儿都装不了（runtime 在服务端）",
     !(await installPlan("transformers", mac)).ok && !(await installPlan("transformers", lin)).ok);
 
+  // "Cannot install here" and "this app cannot run it" must not be conflated:
+  // the second is not fixed by installing anything.
+  const tf = await installPlan("transformers", mac);
+  const vm = await installPlan("vllm", mac);
+  check("transformers 标为 runtime（装了也没用）", tf.kind === "runtime", "kind=" + tf.kind);
+  check("vllm 标为 platform（平台就没有）", vm.kind === "platform", "kind=" + vm.kind);
+  check("两者都是 ok:false 但类别不同", !tf.ok && !vm.ok && tf.kind !== vm.kind);
+
   const macVllm = await installPlan("vllm", mac);
   check("装不了时给出的是原因，不是命令",
     !macVllm.ok && macVllm.reason.indexOf("macOS") >= 0, macVllm.reason.slice(0, 60));

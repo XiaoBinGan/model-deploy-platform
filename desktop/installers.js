@@ -29,8 +29,12 @@ function manual(steps) {
 
 // Reason-only entries: there is no command that would fix these, and pretending
 // otherwise would send the user off to run something that cannot work.
-function cannot(reason, hint) {
-  return { ok: false, reason, manual: hint || "" };
+//
+// Two different kinds of "no", which the UI must not conflate:
+//   "platform" - this machine cannot have it, whatever you install
+//   "runtime"  - it may well be installed; the desktop app just cannot run it
+function cannot(reason, hint, kind) {
+  return { ok: false, reason, manual: hint || "", kind: kind || "platform" };
 }
 
 async function installPlan(name, ctx) {
@@ -40,8 +44,9 @@ async function installPlan(name, ctx) {
   if (name === "transformers") {
     return cannot(
       "transformers 的 runtime 在服务端代码里（app/runtimes/transformers_server.py），" +
-      "桌面端本地没有这个模块，装了也跑不起来。",
-      "要用它，请在控制面所在机器上部署。"
+      "桌面端本地没有这个模块。这不是没装的问题——装了也一样跑不起来。",
+      "要用它，请在控制面所在机器上部署。",
+      "runtime"
     );
   }
 
