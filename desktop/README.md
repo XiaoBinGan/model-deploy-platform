@@ -87,6 +87,28 @@ Windows 特意避开 `Win32_VideoController.AdapterRAM`——它是 uint32，
 | vLLM / SGLang | 明确 `BLOCKED`：vLLM 官方只发 manylinux 的 x86_64/aarch64 wheel，没有 macOS 版本，源码包依赖 CUDA/ROCm 内核 |
 | transformers | 控制面**有**实现（`app/runtimes/transformers_server.py`），但那个 runtime 模块在服务端代码里，桌面端本地跑不了，所以这里也是 BLOCKED |
 
+### 控制面是提示源，不是命令源
+
+llama.cpp 那条会向控制面要规划，而 `/api/plans/preview` 返回的是一个**拼好的 argv**。
+修前它被原样 spawn——控制面无鉴权，谁能应答那个地址，谁就能在这台机器上执行任意命令。
+
+现在只取**一个整数**（上下文窗口），argv 一律本地拼：
+
+```js
+const window = safeWindow(data.decision.planned_window);  // 1024..1048576，否则丢弃
+const argv = this._llamaArgv(item, window);               // 本地拼
+```
+
+顺带：警告里的换行会被压平（否则能伪造日志行），端口加了 1024~65535 校验。
+
+```bash
+node test-trust.js
+```
+
+`test-trust.js` 起一个**敌对服务**，返回 `command: ["<evil.sh>"]`，
+断言脚本从未被执行、argv 是本地拼的、但服务给的窗口仍然生效。
+完整设计见 docs/trust-boundary.md。
+
 ## MLX：Apple Silicon 上真正对标 vLLM 的东西
 
 在 Mac 上想要 vLLM 那种吞吐，对应的不是 vLLM，是 MLX。

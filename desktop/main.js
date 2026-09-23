@@ -27,9 +27,31 @@ async function createWindow() {
   });
   win.loadURL(local.url);
   win.once("ready-to-show", () => win.show());
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  // Only real web links reach the OS browser. Handing openExternal an
+  // unchecked URL would let page content ask the system to open file:// paths or
+  // custom schemes, which is a way to launch a local application.
+  const openExternally = (url) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
     shell.openExternal(url);
+  };
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
     return { action: "deny" };
+  });
+
+  // The window *is* the app, so it must not navigate anywhere else. A link that
+  // tries is sent to the OS browser instead of replacing the UI.
+  win.webContents.on("will-navigate", (event, url) => {
+    if (url.startsWith(local.url)) return;
+    event.preventDefault();
+    openExternally(url);
   });
   win.on("closed", () => {
     win = null;

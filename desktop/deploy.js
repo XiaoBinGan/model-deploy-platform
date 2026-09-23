@@ -15,8 +15,34 @@ const STOP_GRACE_MS = 5000;
 const WARMUP_ATTEMPT_MS = 120 * 1000;
 const WARMUP_TOTAL_MS = 30 * 60 * 1000;
 
+// The service is a hint source, never a command source. These bounds are what
+// makes that enforceable: a value outside them is treated as absent.
+const DEFAULT_WINDOW = 65536;
+const MIN_WINDOW = 1024;
+const MAX_WINDOW = 1048576;
+const MIN_PORT = 1024;
+const MAX_PORT = 65535;
+
 function nowIso() {
   return new Date().toISOString().replace(/[.][0-9]{3}Z$/, "Z");
+}
+
+// A context window below 1K is meaningless and one above 1M would try to
+// allocate the machine to death. Anything else, including a non-number, is
+// reported as "no opinion" so the caller falls back to its own default.
+function safeWindow(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const w = Math.floor(n);
+  if (w < MIN_WINDOW || w > MAX_WINDOW) return null;
+  return w;
+}
+
+// Warnings are rendered into the deployment log, so a newline in one would let
+// the service forge additional log lines.
+function safeWarnings(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 20).map((w) => String(w).replace(/[\r\n]+/g, " ").slice(0, 300));
 }
 
 function hasBinary(name) {
@@ -115,7 +141,8 @@ class Deployments {
   create(req) {
     const backend = req.backend || "ollama";
     const id = "dep_" + Date.now() + "_" + (this.seq += 1);
-    let port = Number(req.port) || 8000;
+    let port = Number(req.port);
+    if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) port = 8000;
     let modelPath = req.model_path || req.model_id || "custom";
     if (backend === "ollama") {
       port = OLLAMA_PORT;
@@ -516,11 +543,13 @@ class Deployments {
     }
 
     const plan = await this._plan(item);
-    this._log(item, "命令：" + plan.command.join(" "));
-    for (const w of plan.warnings || []) this._log(item, "警告：" + w);
+    // Built here, never taken from the service. See _plan().
+    const argv = this._llamaArgv(item, plan.window);
+    this._log(item, "命令：" + argv.join(" "));
+    for (const w of plan.warnings) this._log(item, "警告：" + w);
 
-    const bin = plan.command[0];
-    const args = plan.command.slice(1);
+    const bin = argv[0];
+    const args = argv.slice(1);
     let proc;
     try {
       proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -584,15 +613,20 @@ class Deployments {
     return false;
   }
 
+  // Ask the service how big a context window this model fits in, and nothing
+  // else.
+  //
+  // The endpoint also returns a ready-made argv ("command"), and this used to be
+  // spawned verbatim. That handed arbitrary code execution on this machine to
+  // whoever could answer the service URL - which is unauthenticated and, when
+  // the service is remote, not necessarily the control plane at all (DESK-01).
+  //
+  // So the argv is assembled locally from local state, and the only thing taken
+  // from the response is a single integer, clamped to a range where a context
+  // window is even meaningful. Warnings are carried through as text, with
+  // newlines stripped so they cannot forge extra log lines.
   async _plan(item) {
-    const fallback = {
-      command: [
-        "llama-server", "-m", item.model_path, "--host", "127.0.0.1",
-        "--port", String(item.port), "-c", "65536", "-ctk", "q8_0", "-ctv", "q8_0",
-        "-fa", "on", "-ngl", "99",
-      ],
-      warnings: [],
-    };
+    const fallback = { window: DEFAULT_WINDOW, warnings: [] };
     if (!this.service) return fallback;
     try {
       const r = await fetch(this.service + "/api/plans/preview", {
@@ -610,11 +644,25 @@ class Deployments {
       });
       if (!r.ok) return fallback;
       const data = await r.json();
-      if (!Array.isArray(data.command) || !data.command.length) return fallback;
-      return { command: data.command, warnings: data.warnings || [] };
+      const window = safeWindow(data && data.decision && data.decision.planned_window);
+      return {
+        window: window === null ? DEFAULT_WINDOW : window,
+        warnings: safeWarnings(data && data.warnings),
+      };
     } catch (e) {
       return fallback;
     }
+  }
+
+  // Every argument comes from local state; the window is the one value the
+  // service influenced, and it arrives already clamped.
+  _llamaArgv(item, window) {
+    const kv = item.kv_quant === "f16" ? "f16" : "q8_0";
+    return [
+      "llama-server", "-m", item.model_path, "--host", "127.0.0.1",
+      "--port", String(item.port), "-c", String(window),
+      "-ctk", kv, "-ctv", kv, "-fa", "on", "-ngl", "99",
+    ];
   }
 
   async stop(id) {

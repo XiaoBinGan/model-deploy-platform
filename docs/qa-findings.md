@@ -30,10 +30,22 @@
 | DESK-06 | 严重 | 世代计数让 stop 后的旧启动结果无法翻回 RUNNING | 世代过期验证 |
 | DESK-08 | 一般 | 新增 stopAll()，接进 server.close 与 before-quit | 假 llama-server 验证 |
 
-**未修（需要先定设计）**：B-01、B-04、DESK-01、B-12、DESK-16 这组信任边界问题。
-核心待定问题是「控制面到底是不是本机专属」：如果是，就绑死 127.0.0.1、
-关掉 CORS 通配、加本机 token；如果要局域网共享，就得引入认证。
-这决定了桌面端该不该白名单校验控制面返回的 command[0]。
+### 第二轮：信任边界（已修）
+
+已修 5 条，提交见 git log。设计原则定为「**控制面是提示源，不是命令源**」——
+服务端只提供数字和文本，不提供可执行的东西。完整说明见 docs/trust-boundary.md。
+
+| 编号 | 严重程度 | 修复方式 | 回归测试 |
+|---|---|---|---|
+| DESK-01 | 严重 | argv 一律本地拼；服务端只贡献一个整数（上下文窗口），经 safeWindow 夹在 1024~1048576。警告压平换行防日志伪造。端口加 1024~65535 校验 | desktop/test-trust.js（敌对服务返回 command，断言从未执行） |
+| B-01 | 严重 | 默认不装 CORS 中间件（页面本来就同源）；需要时用 MDP_CORS_ORIGINS 显式开 | test_trust_boundary.py（6 条） |
+| B-04 | 严重 | _require_local() 加到全部 5 个写操作；读操作保持开放 | test_trust_boundary.py（12 条参数化） |
+| B-12 | 一般 | Host 头只在确实指向本机时回显，否则用本机地址替换 | test_trust_boundary.py（3 条） |
+| DESK-16 | 一般 | openExternal 只放行 http/https；新增 will-navigate 阻止窗口被导航离开 | 代码审查 + app 启动验证 |
+
+**为什么不是加 token**：控制面本来就不该有权指定客户端执行什么。
+把 argv 收归本地之后，DESK-01 直接消失，不需要引入 token 机制，
+也不需要回答「控制面是不是本机专属」这个问题——两种部署形态都安全。
 
 **已记录但未修**：B-08（plan_window 对 native 小于 64K 的模型返回 64K）
 在 backend/tests/test_qa_regressions.py 里标记为 xfail strict，

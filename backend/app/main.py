@@ -15,14 +15,24 @@ from .runtimes import ollama_runtime
 
 app = FastAPI(title="Model Deploy Platform", version="0.2.0")
 
-# LAN control plane: allow other machines on the network to call the API.
-# This is an unauthenticated control plane, so only expose it on trusted nets.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The page is always served from this same origin - the desktop app loads it
+# from the local control plane, and a browser opening the LAN address does too -
+# so nothing here needs cross-origin access.
+#
+# allow_origins=["*"] was worse than unnecessary: this control plane is
+# unauthenticated, so a wildcard let any website a user happened to visit drive
+# it from their browser, including deploying models on the LAN host. Without the
+# middleware a cross-origin JSON POST fails its preflight and never arrives.
+#
+# A genuinely split deployment can opt back in with MDP_CORS_ORIGINS.
+CORS_ORIGINS = [o.strip() for o in os.environ.get("MDP_CORS_ORIGINS", "").split(",") if o.strip()]
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # A shared service must not deploy to itself on behalf of a remote user: the
 # model would land on the server, not on their machine. Off by default; an
@@ -70,13 +80,44 @@ def _client_is_local(request: Request) -> bool:
 
 
 def _public_host(request: Request) -> str:
-    """Host a remote caller should use, derived from the request itself."""
-    host = request.headers.get("host") or request.url.hostname or "127.0.0.1"
-    return host.split(":")[0]
+    """Host a remote caller should use, derived from the request itself.
+
+    The Host header is caller-controlled, and this value is reflected into the
+    endpoint URLs the UI displays and calls, so an unchecked header would let a
+    caller aim those at a host of their choosing. Only a name that actually
+    belongs to this machine is echoed back; anything else is replaced with this
+    machine's own address.
+    """
+    candidate = (request.headers.get("host") or "").split(":")[0].strip().lower()
+    if candidate and (candidate in LOOPBACK or candidate in _local_addresses()):
+        return candidate
+    for address in sorted(_local_addresses()):
+        # Prefer IPv4: it is the form a user can actually paste elsewhere.
+        if address in ("127.0.0.1", "::1") or ":" in address:
+            continue
+        return address
+    return "127.0.0.1"
 
 
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
+
+
+def _require_local(request: Request) -> None:
+    """Guard every endpoint that changes state on this machine.
+
+    Only POST /api/deployments used to be checked, so a remote caller could not
+    create a deployment but could still start, stop, delete and chat with the
+    ones that already existed - which is the same control over the host by a
+    different route. Reads stay open so a shared service can still hand out
+    recommendations.
+    """
+    if not _client_is_local(request) and not ALLOW_REMOTE_DEPLOY:
+        raise HTTPException(
+            status_code=403,
+            detail="远端客户端不允许在服务器上改动部署：这些操作作用在服务器，而不是你的机器。"
+                   "请在本机执行参数预览给出的命令；若确需放开，设置 MDP_ALLOW_REMOTE_DEPLOY=1。",
+        )
 
 
 @app.get("/api/health")
@@ -208,12 +249,7 @@ class DeployRequest(BaseModel):
 
 @app.post("/api/deployments")
 def create_deployment(req: DeployRequest, request: Request):
-    if not _client_is_local(request) and not ALLOW_REMOTE_DEPLOY:
-        raise HTTPException(
-            status_code=403,
-            detail="远端客户端不允许在服务器上创建部署：模型会部署到服务器，而不是你的机器。"
-                   "请在本机执行参数预览给出的命令；若确需放开，设置 MDP_ALLOW_REMOTE_DEPLOY=1。",
-        )
+    _require_local(request)
     return deployments.create(
         model_path=req.model_path, model_id=req.model_id, backend=req.backend,
         port=req.port, dtype=req.dtype, quantization=req.quantization, model_name=req.model_name,
@@ -221,15 +257,18 @@ def create_deployment(req: DeployRequest, request: Request):
     )
 
 @app.post("/api/deployments/{dep_id}/start")
-def start_deployment(dep_id: str):
+def start_deployment(dep_id: str, request: Request):
+    _require_local(request)
     return deployments.start(dep_id)
 
 @app.post("/api/deployments/{dep_id}/stop")
-def stop_deployment(dep_id: str):
+def stop_deployment(dep_id: str, request: Request):
+    _require_local(request)
     return deployments.stop(dep_id)
 
 @app.delete("/api/deployments/{dep_id}")
-def delete_deployment(dep_id: str):
+def delete_deployment(dep_id: str, request: Request):
+    _require_local(request)
     try:
         return deployments.delete(dep_id)
     except ValueError as e:
@@ -253,7 +292,10 @@ class DeploymentTestRequest(BaseModel):
     max_tokens: int = 512
 
 @app.post("/api/deployments/{dep_id}/test")
-def deployment_test(dep_id: str, req: DeploymentTestRequest):
+def deployment_test(dep_id: str, req: DeploymentTestRequest, request: Request):
+    # Chat consumes the host's compute and can reach any model it serves, so it
+    # is a state-changing action here even though it reads nothing back.
+    _require_local(request)
     return deployments.test_chat(dep_id, req.message, req.model_name, req.max_tokens)
 
 @app.get("/api/backends")
