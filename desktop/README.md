@@ -66,24 +66,48 @@ python3 -m venv ~/.mdp-mlx
 启动命令等价于：
 
 ```bash
-python3 -m mlx_lm.server --model mlx-community/Qwen3-8B-4bit \
-  --host 127.0.0.1 --port 8931 --kv-bits 8
+python3 -m mlx_lm server --model mlx-community/Qwen3-8B-4bit \
+  --host 127.0.0.1 --port 8931
 ```
 
-两个设计点：
+模型用 `mlx-community` 的 4bit 权重（HuggingFace 仓库 id，不是本地路径）。
+catalog 里 22 个条目都有对应的 `mlx-community/*-4bit` 仓库，由 HuggingFace id
+按约定推导（见 `catalog.mlx_repo()`），并有一条 network 测试对着 Hub 校验。
 
-- **模型用 `mlx-community` 的 4bit 权重**（HuggingFace 仓库 id，不是本地路径）
-- **`--kv-bits 8`** 对应项目一直承诺的 `q8_0` KV 量化。统一内存上，正是 KV 量化
-  让 64K 上下文变得负担得起——和 `plan_window()` 里「宁可量化，不砍上下文」同一条原则
+### 三个实测出来的坑
 
-`mlx_lm.server` 提供 `/v1/chat/completions`、`/v1/models` 和 `/health`，
-所以健康检查和 OpenAI 兼容测试页都能直接用。
+真装 mlx-lm 跑通之后才发现的，都已在代码里处理：
 
-不需要真装 mlx-lm 也能跑这条路径的测试：
+**1. `python -m mlx_lm.server` 已废弃。**
+0.31.3 会打印废弃提示，指向 `python -m mlx_lm server`。现在用的是后者。
+
+**2. `--kv-bits` 在已发布的 0.31.3 里根本不存在。**
+它只在 GitHub main 上，还没发版。传进去会直接 `unrecognized arguments` 退出码 2，
+整个部署起不来。所以启动前会跑一次 `--help` 问版本，只在支持时才传；
+不支持就记一条日志说明 KV 走全精度。这个标志对应项目一直承诺的 `q8_0` KV 量化——
+统一内存上，正是 KV 量化让 64K 上下文变得负担得起。
+
+**3. `/health` 返回 200 不等于模型能用。**
+`mlx_lm.server` 先绑端口再加载权重，`ModelProvider` 是**按需加载**的
+（"Load models on demand"），`/health` 只反映生成线程是否存活。
+实测：0.5B 模型从启动到能回答用了 **382 秒**（含下载），而 `/health` 在 3 秒内就 200 了。
+如果直接据此报 RUNNING，用户第一条消息必然超时。
+
+所以健康检查通过后会再做一次 **warmup**（一 token 的补全请求）强制触发加载，
+加载完才标记 RUNNING。客户端的 warmup 超时会让服务端写响应时断管，
+产生一堆 `BrokenPipeError` traceback，属于自造噪声，已从日志里过滤。
+
+### 测试
+
+不需要真装 mlx-lm 就能跑这条路径：
 
 ```bash
 node test-mlx.js
 ```
+
+它造一个假的 `python3`，回应 `import mlx_lm`、按需返回两种 `--help`（有/无
+`--kv-bits`），并起一个真的 HTTP 服务模拟「先监听、后加载」。15 项覆盖探测、
+版本门控、启动、warmup 时序、健康检查、停止杀进程、venv 发现。
 
 ## 路由
 

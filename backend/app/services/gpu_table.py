@@ -12,6 +12,9 @@ machine's unified memory, so vram_gb stays None and uma is True.
 # Ordered most-specific first. Matching is plain substring on a normalized name,
 # so keep longer keys before their prefixes (e.g. "rtx 4070 ti" before "rtx 4070").
 GPU_TABLE = [
+    ("apple m5 max", "apple", None, True),
+    ("apple m5 pro", "apple", None, True),
+    ("apple m5", "apple", None, True),
     ("apple m4 max", "apple", None, True),
     ("apple m4 pro", "apple", None, True),
     ("apple m4", "apple", None, True),
@@ -27,7 +30,10 @@ GPU_TABLE = [
     ("apple m1 max", "apple", None, True),
     ("apple m1 pro", "apple", None, True),
     ("apple m1", "apple", None, True),
-    ("apple gpu", "apple", None, True),
+    # normalize() strips "gpu" as a noise word, so "Apple GPU" arrives here as
+    # bare "apple" and a key spelled "apple gpu" could never match. This entry
+    # must stay last among the Apple rows.
+    ("apple", "apple", None, True),
     ("nvidia h100", "nvidia", 80, False),
     ("nvidia a100", "nvidia", 80, False),
     ("nvidia l40s", "nvidia", 48, False),
@@ -99,6 +105,26 @@ def _trailing_capacity(normalized):
     return None
 
 
+def _matches(key, normalized):
+    """Substring match that refuses to end in the middle of a number.
+
+    Plain substring matching made "rtx 40900" resolve to "rtx 4090", silently
+    reporting 24GB for a card that does not exist. Only keys ending in a digit
+    are guarded, so a key like "geforce mx" still legitimately prefixes mx150.
+    """
+    if not key[-1].isdigit():
+        return key in normalized
+    start = 0
+    while True:
+        i = normalized.find(key, start)
+        if i < 0:
+            return False
+        end = i + len(key)
+        if end >= len(normalized) or not normalized[end].isdigit():
+            return True
+        start = i + 1
+
+
 def lookup(name):
     """Resolve a GPU adapter name into a capacity guess.
 
@@ -110,7 +136,7 @@ def lookup(name):
         return {"matched": False, "vendor": None, "vram_gb": None, "uma": None,
                 "confidence": "none", "note": "未提供 GPU 名称"}
     for key, vendor, vram, uma in GPU_TABLE:
-        if key in normalized:
+        if _matches(key, normalized):
             return {
                 "matched": True,
                 "vendor": vendor,

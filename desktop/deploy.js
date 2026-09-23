@@ -10,6 +10,10 @@ const OLLAMA_PORT = 11434;
 const START_TIMEOUT_S = 90;
 const PULL_TIMEOUT_MS = 30 * 60 * 1000;
 const STOP_GRACE_MS = 5000;
+// mlx-lm loads weights lazily, so "server is listening" and "model can answer"
+// are minutes apart on a large model.
+const WARMUP_ATTEMPT_MS = 120 * 1000;
+const WARMUP_TOTAL_MS = 30 * 60 * 1000;
 
 function nowIso() {
   return new Date().toISOString().replace(/[.][0-9]{3}Z$/, "Z");
@@ -238,6 +242,18 @@ class Deployments {
     }, Promise.resolve(null));
   }
 
+  // Cached: the flag set of an installed package does not change mid-session.
+  async _mlxSupportsKvBits(python) {
+    if (this._mlxKvBits !== undefined) return this._mlxKvBits;
+    const help = await new Promise((resolve) => {
+      execFile(python, ["-m", "mlx_lm", "server", "--help"],
+        { timeout: 30000, maxBuffer: 1 << 20 },
+        (err, stdout, stderr) => resolve(String(stdout || "") + String(stderr || "")));
+    });
+    this._mlxKvBits = help.includes("--kv-bits");
+    return this._mlxKvBits;
+  }
+
   async _runMlx(item, gen) {
     if (process.platform !== "darwin" || process.arch !== "arm64") {
       item.status = "BLOCKED";
@@ -260,14 +276,25 @@ class Deployments {
       return;
     }
 
-    const cmd = [python, "-m", "mlx_lm.server",
+    // "python -m mlx_lm.server" still works but prints a deprecation notice in
+    // mlx-lm 0.31.3; the subcommand form is the one it points at.
+    const cmd = [python, "-m", "mlx_lm", "server",
       "--model", item.model_path,
       "--host", "127.0.0.1",
       "--port", String(item.port)];
-    // 64K context is the floor this project promises, and KV quantization is
-    // what makes it affordable on unified memory. mlx-lm takes bits, not a
-    // quant name, so q8_0 maps to 8. kv_bits === 0 disables it.
-    if (item.kv_bits !== 0) cmd.push("--kv-bits", String(item.kv_bits || 8));
+    // KV quantization is what makes the 64K floor affordable on unified memory,
+    // and q8_0 maps to --kv-bits 8. But mlx-lm only grew that flag after the
+    // released 0.31.3 (it is on main, unreleased), and passing it to an older
+    // build aborts startup with exit code 2. Ask the installed version instead
+    // of assuming. kv_bits === 0 disables it outright.
+    if (item.kv_bits !== 0) {
+      if (await this._mlxSupportsKvBits(python)) {
+        cmd.push("--kv-bits", String(item.kv_bits || 8));
+      } else {
+        this._log(item, "这个 mlx-lm 版本不支持 --kv-bits，KV 缓存按全精度分配" +
+          "（长上下文会更吃内存，必要时换更小的模型）。");
+      }
+    }
     item.command = cmd;
     this._log(item, "命令：" + cmd.join(" "));
 
@@ -285,7 +312,14 @@ class Deployments {
 
     const onData = (buf) => {
       const text = String(buf).replace(/\r/g, "").trim();
-      if (text) this._log(item, text.split("\n").pop());
+      if (!text) return;
+      // Our own warmup timeout closes the connection while the server is still
+      // downloading, so it fails to write its response and prints a long
+      // BrokenPipeError traceback. That is self-inflicted noise and would
+      // otherwise look like a crash.
+      if (text.indexOf("BrokenPipeError") >= 0) return;
+      if (/^[~^ ]+$/.test(text)) return;
+      this._log(item, text.split("\n").pop());
     };
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
@@ -308,15 +342,70 @@ class Deployments {
 
     const healthy = await this._waitHealthy(item, START_TIMEOUT_S, gen);
     if (this._stale(item, gen)) return;
-    if (healthy) {
+    if (!healthy) {
+      if (item.status === "STARTING") {
+        item.status = "FAILED";
+        this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s），已终止进程");
+        await this._kill(proc, STOP_GRACE_MS);
+      }
+      this._save();
+      return;
+    }
+
+    // mlx_lm.server binds the port BEFORE the weights exist: /health is backed by
+    // "the generation thread is alive", so it answers 200 while the model is
+    // still downloading, and ModelProvider loads on demand at the first
+    // completion request. Reporting RUNNING here made the user's first message
+    // time out, so force the load and wait for a real answer.
+    this._log(item, "服务已监听，正在加载权重（首次会下载，可能几分钟）…");
+    const warmed = await this._warmup(item, gen);
+    if (this._stale(item, gen)) return;
+    if (warmed) {
       item.status = "RUNNING";
-      this._log(item, "mlx_lm.server 就绪：" + item.endpoint);
+      this._log(item, "mlx_lm.server 就绪（权重已加载）：" + item.endpoint);
     } else if (item.status === "STARTING") {
       item.status = "FAILED";
-      this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s），已终止进程");
+      this._log(item, "权重加载超时（" + WARMUP_TOTAL_MS / 60000 + " 分钟），已终止进程");
       await this._kill(proc, STOP_GRACE_MS);
     }
     this._save();
+  }
+
+  // Force the lazy load with a one-token completion. A client timeout is the
+  // model still downloading, not a failure, so this retries until the deadline.
+  async _warmup(item, gen) {
+    const deadline = Date.now() + WARMUP_TOTAL_MS;
+    let announced = 0;
+    while (Date.now() < deadline) {
+      if (this._stale(item, gen)) return false;
+      try {
+        const r = await fetch(item.endpoint + "/chat/completions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: item.model_path,
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 1,
+          }),
+          signal: AbortSignal.timeout(WARMUP_ATTEMPT_MS),
+        });
+        if (r.ok) return true;
+        if (r.status >= 400 && r.status < 500) {
+          // A 4xx is a real rejection, not a slow load.
+          this._log(item, "权重加载被拒绝：" + r.status + " " + (await r.text()).slice(0, 160));
+          return false;
+        }
+      } catch (e) {
+        // Still loading: keep waiting rather than failing the deployment.
+      }
+      const waited = Math.round((WARMUP_TOTAL_MS - (deadline - Date.now())) / 1000);
+      if (waited - announced >= 30) {
+        announced = waited;
+        this._log(item, "仍在加载权重…已等待 " + waited + "s");
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    return false;
   }
 
   async _runOllama(item, gen) {

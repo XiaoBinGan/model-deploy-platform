@@ -30,15 +30,22 @@ REASON_KEYS = {
     "backend-incompatible": "当前后端不支持该模型",
 }
 
-VARIANT_PRECISION = {"bf16": 5, "q8_0": 4, "fp8": 3, "awq": 2, "gptq": 2, "q4_k_m": 1}
+VARIANT_PRECISION = {"bf16": 5, "q8_0": 4, "fp8": 3, "awq": 2, "gptq": 2,
+                     "mlx-4bit": 1, "q4_k_m": 1}
 
 
 def _gb(value):
     return int(value * GIB)
 
 
-def _variants(params_b, cuda=True, gguf=True, awq=True):
+def _variants(params_b, cuda=True, gguf=True, awq=True, mlx=None):
     out = []
+    if mlx:
+        # MLX uses its own weight format, published under the mlx-community org,
+        # so this is a separate artifact rather than a backend flag on the GGUF
+        # variant. Sized like q4_k_m because both are 4-bit group quantized.
+        out.append({"quant": "mlx-4bit", "size_bytes": _gb(params_b * 0.62),
+                    "backends": ["mlx"], "validated": True, "repo": mlx})
     if gguf:
         out.append({"quant": "q8_0", "size_bytes": _gb(params_b * 1.10),
                     "backends": ["ollama", "llama.cpp", "transformers"], "validated": True})
@@ -113,6 +120,7 @@ class VariantChoice:
             "quantization": self.variant["quant"],
             "backend": self.backend,
             "backends": self.variant["backends"],
+            "mlx_repo": self.variant.get("repo"),
             "capabilities": self.entry.capabilities,
             "context_length": self.entry.native_ctx,
             "memory_gb": round(self.variant["size_bytes"] / GIB, 2),
@@ -212,19 +220,36 @@ def recommended_entry(budget, choices):
     return best, "fastest-resident"
 
 
+def mlx_repo(huggingface_id):
+    """Map a HuggingFace id to its mlx-community 4bit counterpart.
+
+    The org republishes weights under the source model's own name with a -4bit
+    suffix, so this is a convention rather than a lookup table. Every derived id
+    in CATALOG is checked against the Hub by tests/test_mlx_catalog.py, which is
+    what keeps the convention from silently rotting.
+    """
+    if not huggingface_id or "/" not in huggingface_id:
+        return None
+    return "mlx-community/" + huggingface_id.split("/", 1)[1] + "-4bit"
+
+
 def _e(params_b, quality, layers, kv_kib, ctx, caps, cuda=True, gguf=True, awq=True,
        decode_fraction=1.0, moe=False, mtp=False, source=None, vocab=152064):
     name = source.get("label") if source else None
     return CatalogEntry(
         id=source["id"], name=name or source["id"], params_b=params_b, quality=quality,
         layers=layers, kv_bytes_per_token=int(kv_kib * 1024), n_vocab=vocab,
-        native_ctx=ctx, capabilities=caps, variants=_variants(params_b, cuda, gguf, awq),
+        native_ctx=ctx, capabilities=caps,
+        variants=_variants(params_b, cuda, gguf, awq, mlx=(source or {}).get("mlx")),
         decode_fraction=decode_fraction, moe=moe, mtp=mtp, source=source or {},
     )
 
 
-def _s(id_, label, ollama=None, hf=None):
-    return {"id": id_, "label": label, "ollama": ollama, "huggingface": hf}
+def _s(id_, label, ollama=None, hf=None, mlx="auto"):
+    # mlx="auto" derives the repo; pass mlx=None for entries whose HuggingFace id
+    # is already a CUDA-specific artifact (an AWQ repo has no mlx counterpart).
+    return {"id": id_, "label": label, "ollama": ollama, "huggingface": hf,
+            "mlx": mlx_repo(hf) if mlx == "auto" else mlx}
 
 
 CATALOG = [
@@ -251,8 +276,8 @@ CATALOG = [
     _e(32.0, 88, 64, 320, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-32b", "Qwen3 32B · GGUF", "qwen3:32b", "Qwen/Qwen3-32B")),
     _e(32.0, 87, 64, 320, 32768, ["reasoning", "chat", "chinese"], source=_s("deepseek-r1-32b", "DeepSeek-R1 32B · GGUF", "deepseek-r1:32b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")),
     # CUDA-only extras (no GGUF variant)
-    _e(8.0, 74, 32, 128, 32768, ["chat", "vision", "chinese"], gguf=False, source=_s("qwen2.5-vl-7b-cuda", "Qwen2.5-VL 7B · AWQ/GPTQ", None, "Qwen/Qwen2.5-VL-7B-Instruct-AWQ")),
-    _e(3.8, 66, 32, 56, 131072, ["chat", "code", "english", "reasoning"], gguf=False, source=_s("phi-4-mini-cuda", "Phi-4-mini · AWQ/GPTQ", None, "microsoft/Phi-4-mini-instruct")),
+    _e(8.0, 74, 32, 128, 32768, ["chat", "vision", "chinese"], gguf=False, source=_s("qwen2.5-vl-7b-cuda", "Qwen2.5-VL 7B · AWQ/GPTQ", None, "Qwen/Qwen2.5-VL-7B-Instruct-AWQ", mlx=None)),
+    _e(3.8, 66, 32, 56, 131072, ["chat", "code", "english", "reasoning"], gguf=False, source=_s("phi-4-mini-cuda", "Phi-4-mini · AWQ/GPTQ", None, "microsoft/Phi-4-mini-instruct", mlx=None)),
 ]
 
 

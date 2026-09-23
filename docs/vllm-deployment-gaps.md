@@ -148,6 +148,32 @@ MLX 后端不需要真装 mlx-lm 就能测：desktop/test-mlx.js 会造一个假
 （回应 import mlx_lm，并起一个真的 /health 服务），覆盖探测、启动、参数、
 健康检查、停止杀进程。10/10 通过。
 
+第三轮（Mac 完善）又修了 3 条，全部来自真装 mlx-lm 之后暴露的问题：
+
+| 编号 | 状态 | 修复方式 |
+|---|---|---|
+| — | 已修 | **GPU 表：Apple M5 查不到**。表里有 m1~m4 却没有 m5，而本机就是 M5。更隐蔽的是 normalize() 把 "gpu" 当噪声词删掉，所以 "Apple GPU" 变成裸 "apple"，永远匹配不到 "apple gpu" 这个键。已补 m5/m5 pro/m5 max，并把键改成 "apple"。 |
+| — | 已修 | **GPU 表的数字前缀误匹配**。"rtx 40900" 会子串命中 "rtx 4090" 并借走 24GB。加了「数字结尾的键后面不能紧跟数字」的边界规则，同时不影响 "geforce mx" 这种合法前缀（MX150 仍能命中）。 |
+| 3 补 | 已修 | **catalog 里一个 MLX 模型都没有**。MLX 后端有了、模型却选不出来。现在 22 个条目都有 mlx-community/*-4bit 变体，仓库 id 由 HuggingFace id 按约定推导，另有一条 network 测试对着 Hub 校验全部 23 个仓库确实存在。 |
+
+真装 mlx-lm（0.31.3）跑通之后发现的三个坑，都已处理：
+
+1. **python -m mlx_lm.server 已废弃** —— 改为 python -m mlx_lm server
+2. **--kv-bits 在已发布版本里不存在**（只在 GitHub main）—— 传进去直接退出码 2，
+   部署起不来。现在启动前跑一次 --help 问版本，只在支持时才传
+3. **/health 返回 200 不等于模型能用** —— mlx_lm.server 先绑端口再加载权重，
+   ModelProvider 是按需加载。实测 0.5B 模型从启动到能回答用了 382 秒，
+   而 /health 在 3 秒内就 200。现在健康检查通过后再做一次 warmup
+   （一 token 补全）强制触发加载，加载完才标记 RUNNING
+
+真机实测（Apple M5 / 24GB）：
+
+    后端探测   ["ollama","mlx"]
+    启动耗时   382.4s（0.5B 模型，含首次下载 6 分钟）
+    对话       ok=true  reply="我是来自阿里云的大规模语言模型，我叫通义千问。"
+    usage      {prompt_tokens:33, completion_tokens:17}
+    停止       pid 已不存在，procs=0
+
 未修：5（错误引导）、6（planner 平台判定）、7（创建时校验）。
 
 ## 四、建议的处理顺序
