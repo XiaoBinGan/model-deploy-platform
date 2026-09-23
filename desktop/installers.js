@@ -103,17 +103,29 @@ async function installPlan(name, ctx) {
     if (platform === "linux") {
       const pkg = name === "vllm" ? "vllm" : "sglang[all]";
       const steps = [{
-        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）",
+        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）。" +
+          "官方镜像 vllm/vllm-openai + nvidia-container-toolkit 是更常见的做法，" +
+          "但那条路要把模型目录挂进容器，这里装原生包更直接",
         argv: ["python3", "-m", "pip", "install", pkg],
       }];
       return { ok: true, backend: name, steps, manual: manual(steps) };
     }
+    if (platform === "darwin") {
+      // Docker does not rescue this one, and users will ask, so say why rather
+      // than leaving "no wheel" as the whole story.
+      return cannot(
+        name + " 官方只发 manylinux 的 x86_64 / aarch64 wheel，没有 macOS 版本。" +
+        "Docker 也不行：Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供，" +
+        "macOS 上容器拿不到 GPU，纯 CPU 跑远远达不到可用速度。" +
+        "Mac 上对应的东西是 MLX。",
+        "https://docs.vllm.ai/en/latest/deployment/docker.html"
+      );
+    }
     return cannot(
-      platform === "darwin"
-        ? name + " 官方只发 manylinux 的 x86_64 / aarch64 wheel，没有 macOS 版本，" +
-          "源码包也依赖 CUDA/ROCm 内核。在 Mac 上装不了，MLX 才是对应的东西。"
-        : name + " 在 Windows 上需要 WSL2 + NVIDIA 驱动，不能在原生 Windows 里跑。",
-      "https://docs.vllm.ai/en/latest/getting_started/installation.html"
+      name + " 不能在原生 Windows 上跑。可行的路径是 WSL2 + NVIDIA 驱动 + Docker" +
+      "（WSL2 本身没有版本限制，家庭版也能装），但整个过程要在 WSL2 里做。" +
+      "机器上没有 NVIDIA 显卡的话，这条路径也不通。",
+      "https://docs.vllm.ai/en/latest/deployment/docker.html"
     );
   }
 
