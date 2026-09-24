@@ -69,7 +69,7 @@ Docker 部署要同时落到四个地方（控制面规划、桌面端执行、�
 桌面端 `_dockerArgv(item, window)` 与控制面 `planner.py` 的预览分支**必须生成同样的形状**：
 
 ```
-docker run --rm --name mdp-<id>
+docker run --rm
   -p 127.0.0.1:<port>:<container_port>
   [--gpus <gpus>]                       # gpus == "none" 时整条省略
   -v <host>:<container>[:ro] ...        # 每个 volume 一条
@@ -80,7 +80,10 @@ docker run --rm --name mdp-<id>
   <extra_args...>
 ```
 
-`<镜像专属参数>` 按镜像名子串决定（**不按 backend 决定**，因为镜像是用户给的）：
+`<镜像专属参数>` 按镜像名子串决定（**不按 backend 决定**，因为镜像是用户给的）。
+**两侧都必须先把镜像名转成小写再匹配**（`planner._docker_family` 用 `image.lower()`，
+`deploy.js` 用 `.toLowerCase()`）——否则 `VLLM/VLLM-OPENAI:LATEST` 会在控制面得到
+8000 + vllm 参数、在桌面端得到 8080 且没有参数，同一个镜像名给出两条不同的命令：
 
 | 镜像含 | 追加 |
 |---|---|
@@ -111,6 +114,12 @@ mkdir 失败只写日志告警，不阻断启动（用户可能挂了自己指�
 `-v ~/.cache/huggingface:/hf`，Docker 后挂覆盖先挂，用户显式指定的目录被静默吃掉且没有任何提示。
 
 ## 4.1 容器生命周期（`--name` 的代价，必须配套）
+
+**`--name` 只属于桌面端，不在控制面的预览里。** 名字取 `mdp-<部署 id>`：
+`deploy.js` 每次启动前要 `docker rm -f mdp-<部署 id>`，所以名字必须由**部署 id** 决定；
+而部署 id 在预览时还不存在，控制面也从不执行容器。因此预览里**不出现 `--name`**——
+让预览编一个 `mdp-<model_id>` 那样的名字，等于给出一个桌面端永远不会用的名字，
+那不是预览，是误导。用户若手工复制预览命令，Docker 会自动命名，不影响使用。
 
 用 `--name mdp-<id>` 是为了能可靠地找到并杀掉容器，但它带来一个坑：
 `docker run` 前台跑的时候，如果 Electron 被强杀，**docker CLI 死了但容器还活着**，

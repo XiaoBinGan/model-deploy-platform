@@ -132,8 +132,12 @@ def _normalize_docker_options(image, gpus, volumes, extra_args) -> dict:
     Invalid values are rejected, never cleaned up: silently rewriting a user's
     image name or path is worse than a clear 400.
     """
-    image = image.strip() if isinstance(image, str) else ""
-    image = image or DEFAULT_DOCKER_IMAGE
+    # No .strip() here. The docstring above is the rule: reject, never clean up.
+    # " vllm/x" used to 400 in /api/plans/preview and in the desktop but return
+    # 200 here, so the same string was valid through one door and invalid
+    # through another. See docs/qa-round3.md R3-03.
+    if not isinstance(image, str) or not image:
+        image = DEFAULT_DOCKER_IMAGE
     if not _IMAGE_RE.match(image):
         raise InvalidDeploymentRequest(f"非法镜像名：{image!r}")
 

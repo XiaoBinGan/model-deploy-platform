@@ -155,9 +155,15 @@ def test_planner_sizes_for_client_profile_not_server():
     assert out["command"][0] == "llama-server"
     # B-08 invariant: the planned window is capped by the model's native
     # context, never by the 64K floor. Compute it, do not hardcode a number.
+    # R3-08: "1 <= window" was a vacuous lower bound; assert the documented
+    # floor and that the cap actually binds.
     from app.services.catalog import CATALOG
+    from app.services.estimator import FLOOR_WINDOW
+
     entry = next(e for e in CATALOG if e.id == "qwen3-8b")
-    assert 1 <= out["decision"]["planned_window"] <= entry.native_ctx
+    window = out["decision"]["planned_window"]
+    assert 1024 <= window <= entry.native_ctx
+    assert window == min(FLOOR_WINDOW, entry.native_ctx)
 
 
 def test_planner_uses_server_probe_without_profile():

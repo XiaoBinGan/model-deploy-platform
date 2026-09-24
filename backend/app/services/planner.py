@@ -164,15 +164,12 @@ def _docker_effective_backend(image):
     return family if family in {"vllm", "sglang"} else None
 
 
-def _docker_slug(model_id):
-    """mdp-<slug>: ascii alphanumerics + hyphens, lowercase, max 40 chars.
-
-    Deterministic on purpose: the desktop removes the same name with
-    `docker rm -f mdp-<slug>` before every run (contract §4.1), so the preview
-    and the cleanup must derive the identical name from the identical model_id.
-    """
-    slug = re.sub(r"[^a-z0-9-]", "", (model_id or "").lower())[:40]
-    return slug or "model"
+# The container name is deliberately NOT part of the preview. It is a
+# desktop-side lifecycle key: deploy.js runs `docker rm -f mdp-<deployment id>`
+# before every start (contract §4.1), and the deployment id does not exist at
+# preview time. A preview emitting some other name (e.g. derived from model_id)
+# would be a name the desktop never uses — an inconsistency, not a preview.
+# See docs/docker-design.md §4.
 
 
 def _docker_error(message):
@@ -223,7 +220,7 @@ def _docker_argv(req, window, image, gpus, volumes, extra_args):
     """Build the docker argv exactly as docs/docker-design.md §4 specifies."""
     family = _docker_family(image)
     container_port = _docker_container_port(family)
-    cmd = ["docker", "run", "--rm", "--name", f"mdp-{_docker_slug(req.model_id)}",
+    cmd = ["docker", "run", "--rm",
            "-p", f"127.0.0.1:{req.port}:{container_port}"]
     if gpus != "none":
         cmd += ["--gpus", gpus]
@@ -360,7 +357,6 @@ def preview(req: PlanRequest):
         image, gpus, volumes, extra_args = docker_fields
         cmd, container_port = _docker_argv(req, window, image, gpus, volumes, extra_args)
         decision["docker"] = {
-            "name": f"mdp-{_docker_slug(req.model_id)}",
             "image": image,
             "gpus": gpus,
             "container_port": container_port,

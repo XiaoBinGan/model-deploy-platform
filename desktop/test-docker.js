@@ -459,6 +459,72 @@ function buildFakeDocker(dir) {
       !!(be2.installable.docker || be2.unavailable.docker),
       JSON.stringify({ i: Object.keys(be2.installable), u: Object.keys(be2.unavailable) }));
 
+    // --- R3-02: image-family matching is case-insensitive ------------------
+    // planner._docker_family lowercases. A case-sensitive match here used to
+    // give "VLLM/...:LATEST" port 8080 with no image args while the control
+    // plane said 8000 — two different commands for one image name.
+    {
+      const mk = (img) => d._dockerArgv({ id: "dep_case", port: 8001, model_path: "/m/x",
+        image: img, gpus: "all", volumes: [], extra_args: [], container_port: null,
+        hf_cache: "/tmp/hf" }, 32768);
+      const portOf = (a) => a[a.indexOf("-p") + 1];
+      const runtimeArgs = (a) => a.filter((x) => x === "--model" || x === "--model-path");
+      const lower = mk("vllm/vllm-openai:latest");
+      const upper = mk("VLLM/VLLM-OPENAI:LATEST");
+      const mixed = mk("Vllm/OpenAI:Latest");
+      // The image token itself is passed through verbatim (that is the user's
+      // string); what must not differ is everything derived from the family.
+      const sameDerived = (a, b) =>
+        portOf(a) === portOf(b) && JSON.stringify(runtimeArgs(a)) === JSON.stringify(runtimeArgs(b));
+      check("R3-02 vllm 镜像大小写不同但端口与镜像参数一致",
+        sameDerived(upper, lower) && sameDerived(mixed, lower),
+        portOf(lower) + " / " + portOf(upper) + " / " + portOf(mixed));
+      const sg = mk("SGLANG/SGLANG:LATEST");
+      check("R3-02 大写 SGLANG 也按 sglang 处理（30000 + 镜像参数）",
+        portOf(sg) === "127.0.0.1:8001:30000" && runtimeArgs(sg).length === 1,
+        portOf(sg) + " args=" + runtimeArgs(sg).length);
+      const third = mk("ghcr.io/ggml-org/llama.cpp:server");
+      check("R3-02 第三方镜像仍走 8080 且不加镜像参数",
+        portOf(third) === "127.0.0.1:8001:8080" && runtimeArgs(third).length === 0,
+        portOf(third) + " args=" + runtimeArgs(third).length);
+    }
+
+    // --- R3-01: the desktop names its own container, the preview does not --
+    {
+      const argv = d._dockerArgv({ id: "dep_x", port: 8001, model_path: "/m/x",
+        image: "vllm/vllm-openai:latest", gpus: "all", volumes: [], extra_args: [],
+        container_port: null, hf_cache: "/tmp/hf" }, 32768);
+      // The name is the deployment id because _dockerRemove() must be able to
+      // `docker rm -f` exactly what was started. The control plane preview
+      // deliberately carries no --name (it has no deployment id), so the two
+      // sides no longer claim to agree on a name. See docs/qa-round3.md R3-01.
+      check("R3-01 桌面端容器名 = mdp-<部署 id>，与 _dockerRemove 一致",
+        argv[argv.indexOf("--name") + 1] === "mdp-dep_x",
+        argv[argv.indexOf("--name") + 1]);
+    }
+
+    // --- R3-04: a child that ignores SIGTERM must still be killed ----------
+    // Every fake process in this suite exits on SIGTERM, so the SIGKILL branch
+    // of _kill() was never exercised. This child deliberately ignores it.
+    {
+      const { spawn } = require("node:child_process");
+      const stubborn = spawn(process.execPath,
+        ["-e", "process.on('SIGTERM',function(){}); setInterval(function(){},1000);"],
+        { stdio: "ignore" });
+      await sleep(300);
+      const aliveBefore = stubborn.exitCode === null && !stubborn.signalCode;
+      const t0 = Date.now();
+      await d._kill(stubborn, 400);
+      const elapsed = Date.now() - t0;
+      await sleep(200);
+      const dead = stubborn.exitCode !== null || stubborn.signalCode !== null;
+      check("R3-04 忽略 SIGTERM 的子进程最终被 SIGKILL 杀掉（DESK-04 回归）",
+        aliveBefore && dead,
+        "alive_before=" + aliveBefore + " dead_after=" + dead + " elapsed_ms=" + elapsed);
+      check("R3-04 SIGKILL 发生在宽限期之后，不是立刻",
+        elapsed >= 400, "elapsed_ms=" + elapsed);
+    }
+
     console.log(NL + pass + " passed, " + fail + " failed");
     process.exit(fail ? 1 : 0);
   } finally {

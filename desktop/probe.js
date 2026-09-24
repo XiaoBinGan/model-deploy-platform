@@ -79,7 +79,7 @@ function classifyGpuVendor(name, hint) {
   if (/apple/i.test(s) || /\bm[1-9]\b/i.test(s)) return "apple";
   if (/nvidia|geforce|rtx|gtx|quadro|tesla/i.test(s)) return "nvidia";
   if (/amd|radeon|ati\b/i.test(s)) return "amd";
-  if (/intel|iris|uhd|arc graphics|hd graphics/i.test(s)) return "intel";
+  if (/intel|iris|uhd|arc graphics|hd graphics|\barc\s+[ab]\d{3}/i.test(s)) return "intel";
   if (/qualcomm|adreno|snapdragon/i.test(s)) return "qualcomm";
   return "unknown";
 }
@@ -101,6 +101,12 @@ function windowsGpuIsUma(name) {
   // the pattern is checked after the discrete rules, and a four-digit model
   // (RX 7600M) has no word boundary before its trailing "M", so it cannot hit.
   if (/\b\d{3}m\b/.test(s)) return true;
+  // Older AMD APUs. The trailing "G" (HD 8650G, HD 7660G) marks the
+  // integrated part; the discrete HD 7000 cards (HD 7750, HD 7970) have no G.
+  // Kaveri/Richland APUs report "Radeon R7 Graphics" while the discrete card is
+  // "Radeon R7 240" — the literal word Graphics is what separates them.
+  if (/\bradeon\s+hd\s+\d{4}g\b/.test(s)) return true;
+  if (/\bradeon\s+r[2-9]\s+graphics\b/.test(s)) return true;
   // "Radeon" and "Graphics" may have a model word between them (Vega 8).
   if (/\bradeon[^a-z]*graphics\b/.test(s)) return true;
   if (/intel|iris|uhd graphics|hd graphics|vega\s?\d|adreno|qualcomm|snapdragon/.test(s)) {

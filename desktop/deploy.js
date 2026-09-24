@@ -81,7 +81,12 @@ function safePort(value, fallback) {
 // The container port is inferred from the image, never supplied by the caller
 // (docs/docker-design.md §3).
 function inferContainerPort(image) {
-  const name = String(image || "");
+  // Lowercased on purpose: the control plane matches on image.lower()
+  // (planner._docker_family). A case-sensitive match here would give
+  // "VLLM/...:LATEST" port 8080 in the preview and 8080-without-flags in the
+  // desktop while the control plane says 8000 — two different commands for
+  // one image. See docs/qa-round3.md R3-02.
+  const name = String(image || "").toLowerCase();
   if (name.indexOf("sglang") >= 0) return 30000;
   if (name.indexOf("vllm") >= 0) return 8000;
   return 8080;
@@ -873,10 +878,11 @@ class Deployments {
       argv.push("-v", (item.hf_cache || this._hfCachePath()) + ":/hf");
     }
     argv.push(image);
-    if (image.indexOf("vllm") >= 0) {
+    const family = String(image).toLowerCase();
+    if (family.indexOf("vllm") >= 0) {
       argv.push("--model", item.model_path, "--host", "0.0.0.0",
         "--port", String(containerPort), "--max-model-len", String(window));
-    } else if (image.indexOf("sglang") >= 0) {
+    } else if (family.indexOf("sglang") >= 0) {
       argv.push("--model-path", item.model_path, "--host", "0.0.0.0",
         "--port", String(containerPort), "--context-length", String(window));
     }

@@ -104,6 +104,37 @@ function hostileService(reply) {
   await d1.stop(item1.id);
   evilSvc.server.close();
 
+  // --- case 3: the service tries to substitute a docker image/volume -----
+  // test-trust.js previously only covered llama.cpp, so the docker path had no
+  // trust-boundary regression. The desktop must take image/gpus/volumes from
+  // the local UI, never from the control plane (docs/qa-round3.md R3-05).
+  fs.rmSync(argsFile, { force: true });
+  fs.rmSync(marker, { force: true });
+  const dockerSvc = await hostileService({
+    status: "PASS",
+    warnings: [],
+    command: [evil],
+    command_string: evil,
+    decision: {
+      planned_window: 32768,
+      docker: { image: "evil/image:latest", gpus: "all",
+                volumes: [{ host: "/etc", container: "/etc" }],
+                effective_backend: "vllm" },
+    },
+  });
+  const dDocker = new Deployments(path.join(dir, "ddocker"), "http://127.0.0.1:" + dockerSvc.port);
+  const itemDocker = dDocker.create({ backend: "docker", model_path: "/models/qwen3-8b",
+    image: "vllm/vllm-openai:latest", gpus: "all" });
+  const argvDocker = dDocker._dockerArgv(itemDocker, 32768);
+  check("R3-05 docker：镜像取自本地 UI，不采纳服务给的 decision.docker.image",
+    argvDocker.indexOf("vllm/vllm-openai:latest") >= 0 && argvDocker.indexOf("evil/image:latest") < 0,
+    argvDocker.join(" "));
+  check("R3-05 docker：服务给的 volume 没有被采纳",
+    argvDocker.indexOf("/etc:/etc") < 0, argvDocker.join(" "));
+  check("R3-05 docker：argv 里没有恶意脚本", argvDocker.indexOf("evil.sh") < 0, argvDocker.join(" "));
+  check("R3-05 docker：恶意 command 没有被执行", !fs.existsSync(marker));
+  dockerSvc.server.close();
+
   // --- case 2: the window itself is hostile ---
   fs.rmSync(argsFile, { force: true });
   const badSvc = await hostileService({

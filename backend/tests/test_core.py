@@ -39,9 +39,14 @@ def test_llamacpp_command_derives_window_and_kv_quant():
     assert out["command"][0] == "llama-server"
     assert "-ctk" in out["command"] and "q8_0" in out["command"]
     # B-08: the window comes off the ladder but is capped by native_ctx, so it
-    # can be below the 64K floor. Assert the cap, not a frozen number.
+    # can be below the 64K floor. R3-08: "1 <= window" was a vacuous lower
+    # bound; assert the documented floor and that the cap actually binds.
+    from app.services.estimator import FLOOR_WINDOW
+
     entry = next(e for e in CATALOG if e.id == "qwen3-8b")
-    assert 1 <= out["decision"]["planned_window"] <= entry.native_ctx
+    window = out["decision"]["planned_window"]
+    assert 1024 <= window <= entry.native_ctx
+    assert window == min(FLOOR_WINDOW, entry.native_ctx)
 
 
 def test_bitsandbytes_is_blocked_for_vllm():

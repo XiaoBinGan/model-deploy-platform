@@ -34,11 +34,13 @@ def test_docker_argv_matches_contract():
         extra_args=["--max-num-seqs", "4"],
     )
     cmd = out["command"]
-    assert cmd[:5] == ["docker", "run", "--rm", "--name", "mdp-qwen3-8b"]
-    assert cmd[5:7] == ["-p", "127.0.0.1:8001:8000"]
-    assert cmd[7:9] == ["--gpus", "all"]
-    assert cmd[9:13] == ["-v", "/host/models:/models:ro", "-v", "/host/data:/data"]
-    assert cmd[13:17] == ["-e", "HF_HOME=/hf", "-v", f"{HF_CACHE}:/hf"]
+    # No --name: it is a desktop-side lifecycle key, not a preview field (R3-01).
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert "--name" not in cmd
+    assert cmd[3:5] == ["-p", "127.0.0.1:8001:8000"]
+    assert cmd[5:7] == ["--gpus", "all"]
+    assert cmd[7:11] == ["-v", "/host/models:/models:ro", "-v", "/host/data:/data"]
+    assert cmd[11:15] == ["-e", "HF_HOME=/hf", "-v", f"{HF_CACHE}:/hf"]
     image_index = cmd.index("vllm/vllm-openai:latest")
     assert cmd[image_index + 1:image_index + 9] == [
         "--model", "/models/qwen3-8b", "--host", "0.0.0.0", "--port", "8000",
@@ -49,13 +51,19 @@ def test_docker_argv_matches_contract():
 
 def test_docker_gpus_none_omits_the_gpus_flag_entirely():
     out = _preview(gpus="none")
-    assert "--gpus" not in out["command"]
+    cmd = out["command"]
+    # "no --gpus" alone also passed on the pre-docker planner, which never
+    # emitted --gpus at all — so it did not test this rule (R3-06). Pin that
+    # we are on the docker path first.
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert any("vllm" in a for a in cmd)
+    assert "--gpus" not in cmd
 
 
 def test_docker_sglang_image_uses_port_30000_and_context_length():
     out = _preview(image="lmsysorg/sglang:latest", port=8002)
     cmd = out["command"]
-    assert cmd[5:7] == ["-p", "127.0.0.1:8002:30000"]
+    assert cmd[3:5] == ["-p", "127.0.0.1:8002:30000"]
     image_index = cmd.index("lmsysorg/sglang:latest")
     assert cmd[image_index + 1:image_index + 9] == [
         "--model-path", "/models/qwen3-8b", "--host", "0.0.0.0", "--port", "30000",
@@ -67,7 +75,7 @@ def test_docker_unknown_image_gets_no_runtime_args():
     out = _preview(image="ghcr.io/ggml-org/llama.cpp:server", port=8003,
                    extra_args=["--jinja"])
     cmd = out["command"]
-    assert cmd[5:7] == ["-p", "127.0.0.1:8003:8080"]
+    assert cmd[3:5] == ["-p", "127.0.0.1:8003:8080"]
     image_index = cmd.index("ghcr.io/ggml-org/llama.cpp:server")
     assert cmd[image_index + 1:] == ["--jinja"]
 
@@ -84,11 +92,18 @@ def test_docker_empty_image_falls_back_to_default():
     assert "vllm/vllm-openai:latest" in out["command"]
 
 
-def test_docker_name_is_deterministic_for_repeated_previews():
-    first = _preview(model_id="Qwen/Qwen3-8B")["command"]
-    second = _preview(model_id="Qwen/Qwen3-8B")["command"]
-    assert first[4] == "mdp-qwenqwen3-8b"
-    assert first[4] == second[4]
+def test_docker_preview_has_no_container_name():
+    """R3-01: the preview must not name a container the desktop never uses.
+
+    deploy.js runs `docker rm -f mdp-<deployment id>` before every start
+    (contract section 4.1). The deployment id does not exist at preview time,
+    so a preview name derived from model_id would never match the real
+    container — an inconsistency, not a preview.
+    """
+    for model_id in ("Qwen/Qwen3-8B", "qwen3-8b", "模型"):
+        cmd = _preview(model_id=model_id)["command"]
+        assert "--name" not in cmd
+        assert not any(str(a).startswith("mdp-") for a in cmd)
 
 
 def test_docker_user_hf_mount_is_not_shadowed():
@@ -98,11 +113,6 @@ def test_docker_user_hf_mount_is_not_shadowed():
     assert f"{HF_CACHE}:/hf" not in cmd
     assert ["-e", "HF_HOME=/hf"] == cmd[cmd.index("-e"):cmd.index("-e") + 2]
 
-
-def test_docker_slug_is_bounded_and_ascii():
-    assert planner._docker_slug("Qwen/Qwen3-8B") == "qwenqwen3-8b"
-    assert planner._docker_slug("a" * 100) == "a" * 40
-    assert planner._docker_slug("模型") == "model"
 
 
 @pytest.mark.parametrize("bad_image", ["vllm image", "vllm;rm -rf /", "vllm$(id)", 'vllm"x"', "vllm|x"])
@@ -121,7 +131,7 @@ def test_docker_rejects_illegal_gpus(bad_gpus):
 
 def test_docker_accepts_device_list_gpus():
     out = _preview(gpus="0,1")
-    assert ["--gpus", "0,1"] == out["command"][7:9]
+    assert ["--gpus", "0,1"] == out["command"][5:7]
 
 
 def test_docker_rejects_relative_volume_host():
@@ -170,7 +180,25 @@ def test_http_preview_returns_400_for_illegal_docker_fields():
     good = client.post("/api/plans/preview", json={
         "backend": "docker", "model_id": "qwen3-8b", "model_path": "/models/x", "port": 8001})
     assert good.status_code == 200
-    assert good.json()["command"][:5] == ["docker", "run", "--rm", "--name", "mdp-qwen3-8b"]
+    assert good.json()["command"][:3] == ["docker", "run", "--rm"]
+
+
+def test_padded_image_is_rejected_not_stripped():
+    """R3-03: contract section 5 says reject, never clean up.
+
+    POST /api/deployments used to .strip() the image and return 200 while
+    /api/plans/preview and the desktop both 400 — the same string valid
+    through one door and invalid through another.
+    """
+    from app.services import deployments
+
+    for padded in [" vllm/vllm-openai:latest", "vllm/vllm-openai:latest ", "\tvllm/x"]:
+        with pytest.raises(deployments.InvalidDeploymentRequest):
+            deployments._normalize_docker_options(padded, None, None, None)
+    # None / empty still means "use the default image"; that is not cleaning up.
+    for empty in (None, ""):
+        assert deployments._normalize_docker_options(empty, None, None, None)["image"] == \
+            deployments.DEFAULT_DOCKER_IMAGE
 
 
 def test_docker_vllm_image_reuses_catalog_pricing():
@@ -219,4 +247,11 @@ def test_non_docker_backend_ignores_docker_fields():
         image="bad image;", gpus="0;1", volumes=[{"host": "relative", "container": "/c"}],
         extra_args=["bad\narg"],
     ))
-    assert out["command"][0] == "llama-server"
+    cmd = out["command"]
+    # The pre-docker planner also passed this, by ignoring fields it had no
+    # concept of (R3-06). Pin the positive side as well.
+    assert cmd[0] == "llama-server"
+    assert "docker" not in cmd
+    assert "bad image;" not in cmd
+    assert "0;1" not in cmd
+    assert "bad\narg" not in cmd
