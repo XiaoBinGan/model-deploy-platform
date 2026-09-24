@@ -95,9 +95,20 @@ async function waitSettled(base, id, seconds) {
 
   const localPlan = (await postJson(base + "api/plans/preview",
     { model_id: "qwen3-8b", model_path: "/tmp/x.gguf", backend: "llama.cpp", port: 8080 })).body || {};
+  // Assert relative to this machine instead of a hard-coded Apple M5 number:
+  // the plan must use the local probe and must not claim more capacity than the
+  // probed hardware has. This passes on GPUs of any size, including 4GB cards.
+  const selfGpus = Array.isArray(self.gpus) ? self.gpus : [];
+  const discreteGb = selfGpus.filter((g) => !g.uma && g.vram_gb).map((g) => g.vram_gb);
+  const umaOnly = selfGpus.some((g) => g.uma) || discreteGb.length === 0;
+  const capacityGb = umaOnly ? (self.ram_gb || 0) : Math.max.apply(null, discreteGb);
+  const localUsable = (localPlan.hardware || {}).usable_vram_gb;
   check("plan defaults to this machine when none supplied",
-    localPlan.hardware_source === "client:agent" && (localPlan.hardware || {}).usable_vram_gb > 10.5,
-    "source=" + localPlan.hardware_source + " usable=" + (localPlan.hardware || {}).usable_vram_gb + "GB");
+    localPlan.hardware_source === "client:agent" &&
+      typeof localUsable === "number" && localUsable > 0 &&
+      localUsable <= capacityGb + 0.01,
+    "source=" + localPlan.hardware_source + " usable=" + localUsable +
+      "GB (self ram=" + self.ram_gb + "GB, capacity=" + capacityGb + "GB)");
 
   // --- failure path: llama.cpp with a model file that does not exist ---
   const bad = (await postJson(base + "api/deployments",

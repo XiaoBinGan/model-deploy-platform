@@ -58,28 +58,43 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
-  // Keep the OS title bar in step with the dark UI instead of following the
-  // system appearance, which would give a light bar above a dark page.
-  nativeTheme.themeSource = "dark";
-  createWindow();
-});
+// Two instances share one userData directory, and deployments.json is written
+// whole, so a second writer silently drops the first one's records. Hold a
+// single-instance lock: a second launch brings the existing window forward and
+// exits instead of racing on the file.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
 
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  app.whenReady().then(() => {
+    // Keep the OS title bar in step with the dark UI instead of following the
+    // system appearance, which would give a light bar above a dark page.
+    nativeTheme.themeSource = "dark";
+    createWindow();
+  });
 
-app.on("window-all-closed", () => {
-  if (local) local.close();
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
 
-// Quitting must not leave llama-server or an ollama pull behind. before-quit is
-// synchronous, so hold the quit until the children are actually reaped.
-let quitting = false;
-app.on("before-quit", (event) => {
-  if (quitting || !local || !local.stopAll) return;
-  event.preventDefault();
-  quitting = true;
-  local.stopAll().finally(() => app.quit());
-});
+  app.on("window-all-closed", () => {
+    if (local) local.close();
+    if (process.platform !== "darwin") app.quit();
+  });
+
+  // Quitting must not leave llama-server or an ollama pull behind. before-quit
+  // is synchronous, so hold the quit until the children are actually reaped.
+  let quitting = false;
+  app.on("before-quit", (event) => {
+    if (quitting || !local || !local.stopAll) return;
+    event.preventDefault();
+    quitting = true;
+    local.stopAll().finally(() => app.quit());
+  });
+}

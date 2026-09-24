@@ -64,7 +64,41 @@ npm install
 npm start
 ```
 
-内网自用**不需要**签名、不需要 electron-builder、不需要 PyInstaller。
+内网自用**不需要**签名、不需要 PyInstaller。要产出安装包见下面的「打包」。
+
+## 打包
+
+```bash
+cd desktop
+npm install
+npm run dist:mac     # macOS：dmg（arm64 + x64），产物在 desktop/dist/
+npm run dist         # 当前平台：Windows 出 nsis，Linux 出 AppImage
+```
+
+| 平台 | 目标 | 产物 |
+|---|---|---|
+| macOS | dmg | `ModelForge-<version>-arm64.dmg` / `-x64.dmg` |
+| Windows | nsis | `ModelForge Setup <version>.exe` |
+| Linux | AppImage | `ModelForge-<version>.AppImage` |
+
+配置在 `desktop/electron-builder.yml`，图标在 `desktop/build/`
+（`icon.icns` / `icon.ico` / `icon.png`）。只打运行需要的文件
+（`main.js` / `server.js` / `deploy.js` / `installers.js` / `probe.js` /
+`package.json`），测试脚本和 README 不进包。
+
+`frontend/index.html` 通过 `extraResources` 复制到 `Contents/Resources/frontend/`：
+`server.js` 用 `path.join(__dirname, "..", "frontend", "index.html")` 找它，
+打包后 `__dirname` 指向 `Resources/app.asar`，塞进 asar 里会找不到。
+
+**验证状态（诚实标注）**：
+
+- `npx electron-builder --dir --mac` 在本机（macOS / Apple Silicon）**通过**，
+  产出 `dist/mac-arm64/ModelForge.app`。
+- **Windows 的 nsis 配置已写好，但没有在 Windows 上验证过**——本机是 macOS，
+  这里只保证配置语法正确，没有在 Windows 上真正跑过安装包。
+- **macOS 产物未做代码签名**（本机没有 Developer ID 证书，electron-builder 会跳过签名）。
+  首次打开会被 Gatekeeper 拦下，需要右键「打开」，或到「系统设置 → 隐私与安全性」里放行。
+  Windows 未签名同理，首次运行会有 SmartScreen 提示。
 
 ## 探测：读浏览器读不到的东西
 

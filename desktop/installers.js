@@ -21,6 +21,7 @@ const BACKEND_INFO = {
   vllm: "Linux + NVIDIA/AMD 上的高吞吐推理服务",
   sglang: "与 vLLM 同类的推理服务",
   transformers: "HuggingFace 原生，兼容性最好但最慢",
+  docker: "用容器镜像跑推理服务；端口和启动参数由镜像决定",
 };
 
 function manual(steps) {
@@ -168,6 +169,49 @@ async function installPlan(name, ctx) {
       "platform",
       gpu
     );
+  }
+
+  if (name === "docker") {
+    const gpu = gpuPath(ctx.caps || { platform });
+    // The binary being present but the daemon not answering is the common
+    // desktop case (Docker Desktop not started). Installing again does not fix
+    // it, so say what to do instead of offering a redundant install.
+    if (await has("docker")) {
+      return {
+        ok: true,
+        backend: name,
+        steps: [],
+        manual: "Docker 已安装，但守护进程没有运行。启动 Docker Desktop（或 dockerd），" +
+          "等 \`docker info\` 能返回 ServerVersion 后重试。",
+        gpu,
+      };
+    }
+    if (platform === "darwin" && (await has("brew"))) {
+      const steps = [{
+        note: "用 Homebrew 装 Docker Desktop（装完需要启动一次，守护进程才会监听）",
+        argv: ["brew", "install", "--cask", "docker"],
+      }];
+      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
+    }
+    if (platform === "win32" && (await has("winget"))) {
+      const steps = [{
+        note: "用 winget 装 Docker Desktop（装完需要启动一次）",
+        argv: ["winget", "install", "--id", "Docker.DockerDesktop", "-e", "--accept-source-agreements"],
+      }];
+      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
+    }
+    if (platform === "linux") {
+      // Installing Docker Engine needs root and differs per distro; a
+      // `curl | sh` one-liner would also be shell execution, which this project
+      // does not do (docs/docker-design.md §7).
+      return cannot(
+        "装 Docker Engine 需要 root，且各发行版命令不同，不能替你猜。",
+        "https://docs.docker.com/engine/install/",
+        "platform",
+        gpu
+      );
+    }
+    return cannot("没有找到可用的包管理器。", "https://docs.docker.com/get-docker/", "platform", gpu);
   }
 
   return cannot("桌面端不认识这个后端。");

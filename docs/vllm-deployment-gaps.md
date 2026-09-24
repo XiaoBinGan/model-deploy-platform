@@ -196,3 +196,24 @@ vLLM 跑不了是 Mac 的硬约束，不是 app 的问题。
 但顺着这条线测出来的是：**这个 app 对「后端」这个概念只实现了三分之一**——
 探测到了（/api/backends）、推荐了（environment.py）、却没有校验、没有过滤、
 没有删除、也没有把 Mac 上真正该用的 MLX 接进来。
+
+---
+
+## 六、第四轮：gap 5 已修（失败信息补安装引导）
+
+第 177 行「未修：5（错误引导）」在第四轮处理。`desktop/deploy.js` 的 `_run()` 对桌面端
+没有启动路径的后端，不再只写一句「桌面端不支持」，而是分后端说清「为什么」和「下一步」：
+
+- `transformers`：runtime 在控制面服务端（`backend/app/runtimes/transformers_server.py`），
+  桌面端本地没有这个模块——这不是没装的问题，装了也一样跑不起来。下一步是去控制面所在
+  机器部署，本机想跑本地模型请用 ollama 或 mlx。
+- `vllm` / `sglang`：官方只发 Linux wheel，没有 macOS 版本，桌面端无法本地启动。
+  「为什么」直接复用 `installers.js` 的 `gpuPath(caps)`，不再另写一套 GPU/Docker 文案；
+  「下一步」在 macOS 上指向 mlx 或 docker 后端，在 Linux 上指向 `pip install` 或 docker 后端。
+
+这样失败日志和安装弹框用的是同一套平台判断，两处不会再说出互相矛盾的话。
+
+同轮还落地了 docker 后端（`docs/docker-design.md`）：`_dockerArgv()` 本地拼装 argv、
+`create()` 校验 image/gpus/volumes/extra_args、`_runDocker()` 启动容器并在
+启动/停止/删除三处 `docker rm -f` 兜底，测试见 `desktop/test-docker.js`。
+

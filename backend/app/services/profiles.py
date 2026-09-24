@@ -2,8 +2,14 @@
 
 A profile code is a compact, self-verifying string a user can paste back after
 running the probe on their own machine. It is base64url JSON with a version
-prefix and a checksum, so a truncated or tampered code fails loudly instead of
+prefix and a checksum, so a truncated or mistyped code fails loudly instead of
 silently producing a wrong budget.
+
+It is a checksum, not a signature. The digest is an unkeyed sha256 prefix, so
+anyone who can build a payload can recompute it: it catches a truncated or
+hand-edited code (the common failure), but it does NOT prove the profile was
+not tampered with. The budget built from a profile is clamped and marked
+untrusted regardless, so this is a convenience check, not a trust boundary.
 """
 import base64
 import hashlib
@@ -14,6 +20,10 @@ VERSION = "mdp1"
 
 def encode_profile(profile) -> str:
     raw = json.dumps(profile, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    # Unkeyed sha256 prefix: a typo/truncation check, not a tamper-proof
+    # signature. Anyone can recompute it for a payload they wrote. Do not treat
+    # an accepted code as proof of origin; budget_from_profile clamps and flags
+    # the data as untrusted precisely because it cannot be trusted.
     digest = hashlib.sha256(raw).hexdigest()[:8]
     payload = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return VERSION + "." + payload + "." + digest

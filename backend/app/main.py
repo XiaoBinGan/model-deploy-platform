@@ -5,7 +5,7 @@ from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from pydantic import BaseModel
@@ -79,6 +79,26 @@ def _client_is_local(request: Request) -> bool:
     return host in LOOPBACK or host in _local_addresses()
 
 
+def _host_from_header(value: str) -> str:
+    """Strip an optional port and IPv6 brackets from a Host header value.
+
+    A plain split(":")[0] turns "[::1]:8790" into "["; the bracketed form has to
+    be handled first. Returns the bare host, lowercased, with no brackets.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.startswith("["):
+        end = value.find("]")
+        if end != -1:
+            return value[1:end].strip().lower()
+        return value.lstrip("[").strip().lower()
+    host, sep, port = value.rpartition(":")
+    if sep and port.isdigit():
+        return host.strip().lower()
+    return value.lower()
+
+
 def _public_host(request: Request) -> str:
     """Host a remote caller should use, derived from the request itself.
 
@@ -88,7 +108,7 @@ def _public_host(request: Request) -> str:
     belongs to this machine is echoed back; anything else is replaced with this
     machine's own address.
     """
-    candidate = (request.headers.get("host") or "").split(":")[0].strip().lower()
+    candidate = _host_from_header(request.headers.get("host") or "")
     if candidate and (candidate in LOOPBACK or candidate in _local_addresses()):
         return candidate
     for address in sorted(_local_addresses()):
@@ -118,6 +138,34 @@ def _require_local(request: Request) -> None:
             detail="远端客户端不允许在服务器上改动部署：这些操作作用在服务器，而不是你的机器。"
                    "请在本机执行参数预览给出的命令；若确需放开，设置 MDP_ALLOW_REMOTE_DEPLOY=1。",
         )
+
+
+# --- error shape -----------------------------------------------------------
+# Every error leaves the API as {"detail": ...}. A bare 500 used to be
+# text/plain "Internal Server Error", so a client could not parse it the same
+# way it parsed a 400/422. The 500 body is deliberately generic: the exception
+# text (which can carry paths, model names and internals) stays in the server
+# log instead of the response.
+
+@app.exception_handler(deployments.DeploymentNotFound)
+async def _deployment_not_found(request: Request, exc: Exception):
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(deployments.InvalidDeploymentRequest)
+async def _invalid_deployment_request(request: Request, exc: Exception):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(ValueError)
+async def _value_error(request: Request, exc: Exception):
+    # A ValueError from a service is a rejected input, not a server fault.
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 @app.get("/api/health")
@@ -246,6 +294,12 @@ class DeployRequest(BaseModel):
     dtype: str = "bfloat16"
     quantization: str | None = None
     model_name: str | None = None
+    # Docker-only fields (docs/docker-design.md section 2). Ignored entirely by
+    # every other backend; validated in deployments.create().
+    image: str | None = None
+    gpus: str | None = None
+    volumes: list[dict] | None = None
+    extra_args: list[str] | None = None
 
 @app.post("/api/deployments")
 def create_deployment(req: DeployRequest, request: Request):
@@ -254,6 +308,7 @@ def create_deployment(req: DeployRequest, request: Request):
         model_path=req.model_path, model_id=req.model_id, backend=req.backend,
         port=req.port, dtype=req.dtype, quantization=req.quantization, model_name=req.model_name,
         public_host=_public_host(request),
+        image=req.image, gpus=req.gpus, volumes=req.volumes, extra_args=req.extra_args,
     )
 
 @app.post("/api/deployments/{dep_id}/start")

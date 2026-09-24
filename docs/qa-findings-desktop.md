@@ -479,3 +479,92 @@ B) pwned_model exists: false
 - 测试用假 llama-server / 假 ollama 进程已全部 kill，pgrep 无残留。
 - ollama ps 为空（测试模型已卸载）。
 - 未启动第二个 Electron 图形实例；未修改仓库源码；临时文件均在 /tmp/mdptest/ 下。
+
+---
+
+# 修复记录（server.js / main.js / probe.js / smoke.js）
+
+- 范围：desktop/server.js、desktop/main.js、desktop/probe.js、desktop/smoke.js，
+  新增 desktop/test-server.js；未触碰 deploy.js / installers.js / package.json /
+  frontend / backend。
+- 测试：`node test-server.js`（76 项，纯 node）、`node test-trust.js`（11 项）、
+  `node smoke.js`（17 项）全绿。
+
+## A 区（server.js）
+
+| 编号 | 修法 |
+|---|---|
+| DESK-09 | forward() 改为透传客户端请求头：除 hop-by-hop（connection / keep-alive / transfer-encoding / upgrade / te / trailer / proxy-* / host / content-length）外全部带上去，authorization / accept / x-custom / user-agent 不再丢失。 |
+| DESK-10 | 上游 fetch 加 AbortSignal.timeout（默认 30s，MDP_UPSTREAM_TIMEOUT_MS 可覆盖）；超时返回 504「上游控制面超时」，连接失败返回 502。读响应体阶段同样受该 signal 约束。 |
+| DESK-11 | jsonBody() 校验解析结果是普通对象：null / 数组 / 数字 / 字符串一律 400「请求体必须是 JSON 对象」；非法 JSON 也统一成 400。 |
+| DESK-15 | 所有 `/api/deployments/{id}...` 路由先查 `deploys.get(id).id`，不存在返回 404（GET / start / stop / health / test / DELETE 一致）。 |
+| DESK-19 | `/api/health`、`/api/hardware/self`、`/api/backends` 只允许 GET；`/`、install、deployments 各动作与 `/api/plans/preview`、`/api/models/recommend` 都校验方法，不匹配返回 405 并带 Allow 头。 |
+| DESK-21 | forward() 用 upstreamResponseHeaders() 回传上游响应头（至少 content-type、cache-control，以及 x-request-id 等）；因 fetch 已解压，剔除 content-encoding / content-length 等。 |
+| DESK-25 | readBody() 加 1 MiB 上限，超限 413；超限后停止缓存并 drain 剩余 body，保证 413 能写回。 |
+
+顺带：路径穿越（含 `%2e%2e` 编码形式）在进入代理前直接 404，不再转发上游（回归保留）。
+
+## DESK-13（main.js 侧）
+
+`app.requestSingleInstanceLock()`：拿不到锁的第二个实例直接 `app.quit()`；
+第一个实例监听 `second-instance`，把已有窗口 restore + show + focus。
+原有安全配置（contextIsolation:true / nodeIntegration:false / sandbox:true /
+setWindowOpenHandler 的 http(s) 白名单 / will-navigate 本地同源白名单）保持不变，
+test-server.js 里有 6 条静态断言守住。deploy.js 的整文件覆盖写不在本次所有权内，
+单实例锁是「双实例并发写 deployments.json」的根治。
+
+## probe.js（DESK-22/23/26/27/28 + Windows B/C）
+
+- DESK-22：页大小不再写死 16384。优先 `sysctl -n hw.pagesize`，其次解析 vm_stat
+  头部的 `page size of N bytes`，最后回退 4096（Intel 默认），绝不再假设 16K。
+- DESK-23：新增 classifyGpuVendor()，正则覆盖 `m[1-9]`，并优先用 system_profiler
+  的 vendor 字段；M5 等不含 "Apple" 前缀的名字也能判成 apple。
+- DESK-26：vm_stat 解析前去掉千位分隔符。实测本机 `vm_stat` 输出不带逗号
+  （见下），所以真机不是 bug，但这是低成本的健壮性修复。
+- DESK-27：gb() 对正的极小值不再返回 0，而是下限 0.1，避免「有数据」被 falsy 误判。
+- DESK-28：实测确认是定义问题而非 bug，**未改公式**（依据见下）。
+
+### DESK-26/27/28 实测结论
+
+在本机（Apple M5 / macOS 26.5.1 / Node v22.23.2）实测：
+
+- vm_stat 输出 `Pages free: 13223.`，无千位分隔符；`parseInt` 正常。
+  构造 `1,234,567.` 时旧逻辑得到 4（只取逗号前），去逗号后得到 1234567。
+  → 真机无此 bug，去逗号是防御性修复。
+- gb(1 byte)=0、gb(10MB)=0、gb(50MB)=0、gb(100MB)=0.1。
+  → 正的极小值确实会变 0，修复为下限 0.1。
+- 同一时刻 free 13772 + inactive 436833 + speculative 234 = 450839 页 ×16384
+  ≈ 6.88 GiB；加上 purgeable 22684 页 ≈ 7.23 GiB；compressor 占用的 391833 页
+  ≈ 6.0 GiB 是已经压缩驻留的物理页。当前定义取 free+inactive+speculative，
+  是偏保守但成立的近似；purgeable 与 inactive 可能重叠，compressor 并非空闲，
+  故不改公式，只在代码注释里写明取舍。
+
+## Windows B / C（probe.js）
+
+均为静态实现 + 纯函数单测（本机跑不了 Windows，未在真机执行）：
+
+| 条目 | 修法 |
+|---|---|
+| B1 iGPU 当独显 | 新增 windowsGpuIsUma()：先排除 NVIDIA/RTX、Radeon RX/Pro/VII、Arc A/B 数字系列等独显，再判 Intel HD/UHD/Iris/Arc Graphics、Radeon Graphics/Vega、Adreno/Qualcomm/Snapdragon 以及 AMD 三位数+M 核显（780M/760M/680M/890M）为 UMA。UMA 卡 `vram_gb=null`，交给后端按系统内存算，避免 128MB carve-out。 |
+| B2 vendor | 新增 classifyGpuVendor()，覆盖 nvidia / amd / intel / qualcomm / apple。 |
+| B3 nvidia-smi 回退 | 依次尝试 `nvidia-smi`（PATH）、`%SystemRoot%\System32\nvidia-smi.exe`、`%ProgramFiles%\NVIDIA Corporation\NVSMI\nvidia-smi.exe`。 |
+| B4 多路 CPU | Win32_Processor.Name 去重后用 ` + ` 连接，不再只取第一行。 |
+| B5 Windows ARM64 | 无 nvidia-smi 时走注册表/CIM 路径，Adreno 被判为 UMA + qualcomm，内存按系统内存计。 |
+| C WSL2 | 新增 detectWsl() 读 `/proc/version` 是否含 microsoft/wsl；命中时输出 `wsl:true` 与 `wsl_note`，提醒 /proc/meminfo 是 WSL 限额。 |
+
+商标归一化：`normalizeGpuName()` 去掉 `(TM)/(R)/(C)` 与 ™®©、压平空白后再匹配，
+因此 `AMD Radeon(TM) Graphics` 能正确判成 UMA，而 `Intel(R) Arc(TM) A770 Graphics`
+归一化后仍命中独显规则。AMD 三位数+M 核显（`AMD Radeon 780M` 等）单独加了 `/\b\d{3}m\b/`，放在独显判断之后；`RX 7600M`（四位数字）不会命中。
+
+## Windows F（smoke.js）
+
+`usable_vram_gb > 10.5` 改为相对断言：先由 `/api/hardware/self` 推出本机容量
+（UMA 取 ram_gb，独显取最大 vram），再断言 plan 的 usable_vram_gb > 0 且不超过
+该容量。M5 上显示 `usable=19.2GB (self ram=24GB, capacity=24GB)`，小显存机器也能过。
+
+## 新增测试
+
+`desktop/test-server.js`（纯 node，76 项）覆盖：readBody 413、非对象 body 400、
+缺失部署 404、方法不匹配 405、代理超时 504、请求/响应头透传、路径穿越 404、
+main.js 安全静态断言，以及 probe 纯函数（vendor / UMA / 注册表 / nvidia-smi /
+vm_stat / 页大小回退）。跑法：`cd desktop && node test-server.js`。

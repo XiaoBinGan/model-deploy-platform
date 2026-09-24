@@ -158,9 +158,13 @@ model-deploy-platform/
 │   └── requirements.txt              # fastapi, uvicorn, pydantic, httpx
 ├── frontend/
 │   └── index.html                     # 单文件深色工作台 UI
-├── catalog/
-│   ├── models.yaml                    # 默认模型目录
-│   └── compatibility.yaml             # 兼容规则
+├── desktop/
+│   ├── main.js                        # Electron 主进程（单实例锁、窗口安全基线）
+│   ├── server.js                      # 主进程内同源 HTTP 控制面（无 CORS / 无 PNA 预检）
+│   ├── deploy.js                      # 本地部署执行：ollama / llama.cpp / mlx / docker
+│   ├── probe.js                       # 本机硬件探测（macOS / Windows / Linux + WSL）
+│   ├── installers.js                  # 后端可用性判定与一键安装计划
+│   └── electron-builder.yml           # 打包配置（dmg / nsis / AppImage）
 ├── scripts/
 │   └── smoke_test.py                 # API 冒烟测试
 ├── .env.example
@@ -477,13 +481,44 @@ python scripts/smoke_test.py
 真实 SGLang subprocess → /health → /v1/chat/completions
 ```
 
-当前状态：命令生成已实现，真实 subprocess 启动待实现。当前主机未安装 vLLM / SGLang。
+当前状态：命令生成已实现。**原生 subprocess 仍未实现，且在本机（Apple Silicon）不可能实现**——
+vLLM / SGLang 官方只发 `manylinux` 的 x86_64 / aarch64 wheel，没有 macOS 版本，
+源码又依赖 CUDA / ROCm 内核，在 macOS 上编译不过。
 
-### Phase 6 — Docker / WSL2 📋
+Mac 上真正对标 vLLM 的是 MLX，**已实现并做过真实端到端验证**
+（`desktop/deploy.js` 的 `_runMlx`，走 `mlx_lm.server`）。
+Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
+
+### Phase 6 — Docker / WSL2 🟡
 
 ```
 同一套 Plan → Docker 容器执行 / WSL2 内执行
 ```
+
+当前状态：**Docker 部署已实现**，接口契约冻结在 `docs/docker-design.md`。
+
+- 控制面只做规划：`planner.py` 的 docker 分支返回 `docker run` argv 预览，**不执行容器**
+  （控制面可能在另一台机器上）。
+- 桌面端负责执行：`_dockerArgv` 本地拼 argv（信任边界：服务端只贡献一个窗口整数），
+  `_runDocker` 起容器；生命周期按契约 §4.1，启动前 / 停止后 / 删除时各一次 `docker rm -f`。
+- 镜像由用户指定，专属参数按**镜像名子串**决定（含 vllm / 含 sglang / 其它用自带 CMD），
+  不按 backend 决定。
+
+已处理的平台事实：
+
+- macOS 上容器拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），
+  桌面端启动 docker 部署时会写 WARNING，**不假装能用 GPU**。
+- Linux 的 Docker 安装**不提供一键命令**：装 Docker Engine 需要 root 且各发行版命令不同，
+  而 `curl https://get.docker.com | sh` 是管道执行，违反「argv 数组、不过 shell」的信任边界。
+- WSL2 检测读 `/proc/version`（而不是「有没有 `wsl` 命令」），避免把 WSL 的内存限额当宿主机内存。
+
+未验证的部分（不要当成已完成）：
+
+- 开发机是 macOS（Apple M5），有 NVIDIA 显卡的话才谈得上 GPU 容器，本机没有。
+  Docker Desktop 装了但守护进程未运行（`_caps()` 返回 `docker: false`）。
+  docker 执行路径目前用假二进制测（`desktop/test-docker.js`，83 项），
+  **没有做过真实容器集成测试**。
+- Windows nsis 安装包配置已写，但**没有在 Windows 上构建或运行过**。
 
 ---
 

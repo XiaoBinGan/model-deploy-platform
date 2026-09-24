@@ -1,0 +1,64 @@
+# electron-builder 打包配置（ModelForge 桌面端）
+#
+# 用法：在 desktop/ 下执行
+#   npm run dist        # 按当前平台出包
+#   npm run dist:mac    # macOS：dmg（arm64 + x64）
+# 产物统一落在 desktop/dist/（已加入 .gitignore）。
+appId: com.modelforge.desktop
+productName: ModelForge
+
+directories:
+  # 构建资源目录，图标就在这里（build/icon.icns|ico|png）
+  buildResources: build
+  output: dist
+
+# 只打运行必需的文件。测试脚本（smoke.js / test-*.js）、README、图标源文件
+# 都不进包。这里没有生产依赖要打（electron 是 devDependency）。
+files:
+  - main.js
+  - server.js
+  - deploy.js
+  - installers.js
+  - probe.js
+  # 目前仓库没有 preload.js，有的话会被这个通配符收进来
+  - preload*.js
+  # 注意：appDir 是 desktop/，frontend/ 在仓库根，所以这条在这里匹配不到东西；
+  # 页面实际由下面的 extraResources 复制到 Resources/frontend/。
+  - frontend/**
+  - package.json
+
+# server.js 里是 path.join(__dirname, "..", "frontend", "index.html")。
+# 打包后 __dirname 指向 Resources/app.asar，所以 index.html 必须落在
+# Resources/frontend/ 下，不能只塞进 asar。用 extraResources 复制到那里。
+extraResources:
+  - from: ../frontend
+    to: frontend
+    filter:
+      - "**/*"
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  icon: build/icon.png
+  category: Utility
+  target:
+    - AppImage

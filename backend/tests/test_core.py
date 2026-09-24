@@ -33,10 +33,15 @@ def test_plan_command_is_argument_list():
 
 
 def test_llamacpp_command_derives_window_and_kv_quant():
+    from app.services.catalog import CATALOG
+
     out = preview(PlanRequest(model_id="qwen3-8b", backend="llama.cpp", model_path="/models/qwen3-8b.gguf"))
     assert out["command"][0] == "llama-server"
     assert "-ctk" in out["command"] and "q8_0" in out["command"]
-    assert out["decision"]["planned_window"] >= 65536
+    # B-08: the window comes off the ladder but is capped by native_ctx, so it
+    # can be below the 64K floor. Assert the cap, not a frozen number.
+    entry = next(e for e in CATALOG if e.id == "qwen3-8b")
+    assert 1 <= out["decision"]["planned_window"] <= entry.native_ctx
 
 
 def test_bitsandbytes_is_blocked_for_vllm():

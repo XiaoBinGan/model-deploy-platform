@@ -4,7 +4,7 @@ const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { installPlan, BACKEND_INFO } = require("./installers");
+const { installPlan, BACKEND_INFO, gpuPath } = require("./installers");
 
 const OLLAMA_BASE = "http://127.0.0.1:11434";
 const OLLAMA_PORT = 11434;
@@ -24,9 +24,22 @@ const MAX_WINDOW = 1048576;
 const MIN_PORT = 1024;
 const MAX_PORT = 65535;
 
+// Docker deployment defaults and hard bounds. These are validated on the way in
+// and never "cleaned up": a silently rewritten image name or path is worse than
+// a rejected request (docs/docker-design.md §5).
+const DEFAULT_DOCKER_IMAGE = "vllm/vllm-openai:latest";
+const DOCKER_IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$/;
+const GPUS_RE = /^[0-9]+(,[0-9]+)*$/;
+const VOLUME_PATH_RE = /^\/[^:\u0000]{0,400}$/;
+const MAX_VOLUMES = 8;
+const MAX_EXTRA_ARGS = 32;
+const MAX_EXTRA_ARG_LEN = 200;
+const DOCKER_REMOVE_TIMEOUT_MS = 15000;
+const HAS_BINARY_TIMEOUT_MS = 8000;
+
 // Every backend the UI can show, so the ones this machine cannot run still get
 // an explanation instead of vanishing from the list.
-const ALL_BACKENDS = ["ollama", "llama.cpp", "mlx", "transformers", "vllm", "sglang"];
+const ALL_BACKENDS = ["ollama", "llama.cpp", "mlx", "transformers", "vllm", "sglang", "docker"];
 
 // An install downloads a lot and can compile; 30 minutes is the same budget a
 // model pull gets.
@@ -54,10 +67,85 @@ function safeWarnings(list) {
   return list.slice(0, 20).map((w) => String(w).replace(/[\r\n]+/g, " ").slice(0, 300));
 }
 
+// Ports below 1024 need root and ports above 65535 are not ports. An invalid
+// value falls back to the caller's default instead of reaching spawn/listen
+// (DESK-17).
+function safePort(value, fallback) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < MIN_PORT || n > MAX_PORT) {
+    return fallback === undefined ? null : fallback;
+  }
+  return n;
+}
+
+// The container port is inferred from the image, never supplied by the caller
+// (docs/docker-design.md §3).
+function inferContainerPort(image) {
+  const name = String(image || "");
+  if (name.indexOf("sglang") >= 0) return 30000;
+  if (name.indexOf("vllm") >= 0) return 8000;
+  return 8080;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Validate the docker-only request fields. Returns the normalised values or
+// throws. A throw becomes a 400 in server.js and nothing is ever spliced into
+// the argv (docs/docker-design.md §5).
+function validateDockerFields(req) {
+  let image = req.image;
+  if (image === undefined || image === null || image === "") image = DEFAULT_DOCKER_IMAGE;
+  if (typeof image !== "string" || !DOCKER_IMAGE_RE.test(image)) {
+    throw new Error("非法的 docker 镜像名：" + String(image).slice(0, 80));
+  }
+
+  let gpus = req.gpus;
+  if (gpus === undefined || gpus === null || gpus === "") gpus = "all";
+  if (typeof gpus !== "string" || !(gpus === "all" || gpus === "none" || GPUS_RE.test(gpus))) {
+    throw new Error("非法的 gpus：" + String(gpus).slice(0, 80));
+  }
+
+  let volumes = req.volumes;
+  if (volumes === undefined || volumes === null) volumes = [];
+  if (!Array.isArray(volumes)) throw new Error("volumes 必须是数组");
+  if (volumes.length > MAX_VOLUMES) throw new Error("volumes 最多 " + MAX_VOLUMES + " 条");
+  const vols = volumes.map((v, i) => {
+    if (!isPlainObject(v)) throw new Error("volumes[" + i + "] 必须是对象");
+    if (typeof v.host !== "string" || !VOLUME_PATH_RE.test(v.host)) {
+      throw new Error("volumes[" + i + "].host 必须是绝对路径");
+    }
+    if (typeof v.container !== "string" || !VOLUME_PATH_RE.test(v.container)) {
+      throw new Error("volumes[" + i + "].container 必须是绝对路径");
+    }
+    if (v.ro !== undefined && typeof v.ro !== "boolean") {
+      throw new Error("volumes[" + i + "].ro 必须是布尔");
+    }
+    if (!fs.existsSync(v.host)) throw new Error("volumes[" + i + "].host 不存在：" + v.host);
+    return { host: v.host, container: v.container, ro: v.ro === true };
+  });
+
+  let extra = req.extra_args;
+  if (extra === undefined || extra === null) extra = [];
+  if (!Array.isArray(extra)) throw new Error("extra_args 必须是数组");
+  if (extra.length > MAX_EXTRA_ARGS) throw new Error("extra_args 最多 " + MAX_EXTRA_ARGS + " 项");
+  const args = extra.map((a, i) => {
+    if (typeof a !== "string") throw new Error("extra_args[" + i + "] 必须是字符串");
+    if (a.length > MAX_EXTRA_ARG_LEN) throw new Error("extra_args[" + i + "] 超过 " + MAX_EXTRA_ARG_LEN + " 字符");
+    if (a.indexOf("\u0000") >= 0 || /[\r\n]/.test(a)) throw new Error("extra_args[" + i + "] 含 NUL 或换行");
+    return a;
+  });
+
+  return { image, gpus, volumes: vols, extra_args: args, container_port: inferContainerPort(image) };
+}
+
 function hasBinary(name) {
   const probe = process.platform === "win32" ? "where" : "which";
   return new Promise((resolve) => {
-    execFile(probe, [name], (err) => resolve(!err));
+    // A which that hangs (network filesystem, wrapper script) must not hang
+    // /api/backends forever (DESK-24).
+    execFile(probe, [name], { timeout: HAS_BINARY_TIMEOUT_MS }, (err) => resolve(!err));
   });
 }
 
@@ -76,6 +164,9 @@ class Deployments {
     this.file = path.join(dataDir, "deployments.json");
     this.items = new Map();
     this.procs = new Map();
+    // Ids deleted in this process, so a re-read merge does not resurrect them
+    // (DESK-13).
+    this._removed = new Set();
     this.seq = 0;
     try {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -86,30 +177,91 @@ class Deployments {
   }
 
   _load() {
+    let text;
     try {
-      const raw = JSON.parse(fs.readFileSync(this.file, "utf8"));
-      for (const item of raw.items || []) {
-        // A child process never survives the app, so anything that claimed to
-        // be running was really stopped when we quit.
-        if (item.status === "RUNNING" || item.status === "STARTING") {
-          item.status = "STOPPED";
-          item.log = (item.log || []).concat("应用重启，进程已不存在，标记为 STOPPED");
-        }
-        item.pid = null;
-        this.items.set(item.id, item);
-      }
-      this.seq = raw.seq || this.items.size;
+      text = fs.readFileSync(this.file, "utf8");
     } catch (e) {
       // First run, or the file was removed. Start empty.
+      return;
+    }
+    let raw;
+    try {
+      raw = JSON.parse(text);
+    } catch (e) {
+      // A truncated or corrupt file used to be dropped without a trace,
+      // silently losing every deployment (DESK-14). Keep a backup and say so.
+      this._backupCorrupt(e);
+      return;
+    }
+    let corrected = false;
+    for (const item of raw.items || []) {
+      // A child process never survives the app, so anything that claimed to
+      // be running was really stopped when we quit.
+      if (item.status === "RUNNING" || item.status === "STARTING") {
+        item.status = "STOPPED";
+        item.log = (item.log || []).concat("应用重启，进程已不存在，标记为 STOPPED");
+        corrected = true;
+      }
+      item.pid = null;
+      this.items.set(item.id, item);
+    }
+    this.seq = raw.seq || this.items.size;
+    // Persist the correction so the file stops claiming RUNNING and the next
+    // load does not append the restart line again (DESK-20).
+    if (corrected) this._save();
+  }
+
+  _backupCorrupt(err) {
+    const backup = this.file + ".bak";
+    try {
+      fs.copyFileSync(this.file, backup);
+      console.error("[deploy] deployments.json 无法解析，已备份到 " + backup + "：" + err.message);
+    } catch (e2) {
+      console.error("[deploy] deployments.json 无法解析，备份也失败：" + e2.message);
+    }
+  }
+
+  // Refresh seq from disk before allocating, so two instances that both loaded
+  // an empty file do not hand out the same deployment id (DESK-13).
+  _nextSeq() {
+    const disk = this._readDisk();
+    if (disk && typeof disk.seq === "number" && disk.seq > this.seq) this.seq = disk.seq;
+    this.seq += 1;
+    return this.seq;
+  }
+
+  // Best-effort read of the on-disk state for merging. Never throws.
+  _readDisk() {
+    try {
+      return JSON.parse(fs.readFileSync(this.file, "utf8"));
+    } catch (e) {
+      return null;
     }
   }
 
   _save() {
+    // Re-read before writing and merge in items another instance added since we
+    // loaded, so two windows do not overwrite each other (DESK-13).
+    const disk = this._readDisk();
+    if (disk && Array.isArray(disk.items)) {
+      for (const item of disk.items) {
+        if (!item || !item.id) continue;
+        if (this._removed.has(item.id)) continue;
+        if (!this.items.has(item.id)) this.items.set(item.id, item);
+      }
+      if (typeof disk.seq === "number" && disk.seq > this.seq) this.seq = disk.seq;
+    }
     const items = [...this.items.values()].map((i) => Object.assign({}, i, { pid: null }));
+    const json = JSON.stringify({ seq: this.seq, items }, null, 2);
+    // Write to a temp file and rename over the target: rename is atomic, so a
+    // crash mid-write cannot leave a truncated deployments.json (DESK-14).
+    const tmp = this.file + ".tmp";
     try {
-      fs.writeFileSync(this.file, JSON.stringify({ seq: this.seq, items }, null, 2));
+      fs.writeFileSync(tmp, json);
+      fs.renameSync(tmp, this.file);
     } catch (e) {
       // Ignore: the in-memory record is still usable.
+      try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
     }
   }
 
@@ -133,6 +285,7 @@ class Deployments {
     // choosing one only produced a deployment that failed at start.
     const backends = [];
     const installed = [];
+    const caps = await this._caps();
     if (await reachable(OLLAMA_BASE + "/api/tags", 1500)) backends.push("ollama");
     if (await hasBinary("llama-server")) backends.push("llama.cpp");
     // MLX is the only high-throughput path on Apple Silicon; vLLM has no macOS
@@ -142,6 +295,10 @@ class Deployments {
     }
     if (await hasBinary("vllm")) installed.push("vllm");
     if (await hasBinary("sglang")) installed.push("sglang");
+    // A `docker` binary on PATH is not enough; only a live daemon makes the
+    // backend deployable. Otherwise the entry goes through installPlan, which
+    // either offers the install or explains that the daemon is down (§6).
+    if (caps.docker) backends.push("docker");
 
     // For everything this app cannot start, work out whether it *could* be
     // installed here and what that would run. Greying an entry out and stopping
@@ -216,6 +373,54 @@ class Deployments {
         return;
       }
       if (child && child.on) child.on("error", () => resolve(false));
+    });
+  }
+
+  _hfCachePath() {
+    // os.homedir() already resolves to USERPROFILE on Windows, so the same
+    // relative path is right on every platform.
+    return path.join(os.homedir(), ".cache", "huggingface");
+  }
+
+  // The HuggingFace cache is always mounted so `--rm` does not throw away
+  // multi-GB weights between starts. Create the host directory if it is
+  // missing; a failure only warns, because the user may point HF elsewhere
+  // (docs/docker-design.md §4).
+  _ensureHfCache(item) {
+    const dir = this._hfCachePath();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      this._log(item, "警告：无法创建 HuggingFace 缓存目录 " + dir + "：" + e.message +
+        "（容器仍会挂载它，权重可能无法跨重启保留）");
+    }
+    item.hf_cache = dir;
+    return dir;
+  }
+
+  // `docker rm -f` by name, via execFile so it stays an argv array and never a
+  // shell string. Failure is expected when the container does not exist, so it
+  // is logged at most and never thrown (docs/docker-design.md §4.1).
+  _dockerRemove(item) {
+    return new Promise((resolve) => {
+      let child;
+      const done = (err, stdout, stderr) => {
+        if (err) {
+          const detail = String(stderr || "").trim() || String(stdout || "").trim() || err.message;
+          if (detail.indexOf("No such container") < 0 && detail.indexOf("No such object") < 0) {
+            this._log(item, "docker rm -f 未删除容器：" + detail.split("\n")[0].slice(0, 160));
+          }
+        }
+        resolve();
+      };
+      try {
+        child = execFile("docker", ["rm", "-f", "mdp-" + item.id],
+          { timeout: DOCKER_REMOVE_TIMEOUT_MS }, done);
+      } catch (e) {
+        resolve();
+        return;
+      }
+      if (child && child.on) child.on("error", () => resolve());
     });
   }
 
@@ -315,14 +520,19 @@ class Deployments {
 
   create(req) {
     const backend = req.backend || "ollama";
-    const id = "dep_" + Date.now() + "_" + (this.seq += 1);
-    let port = Number(req.port);
-    if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) port = 8000;
+    const id = "dep_" + Date.now() + "_" + this._nextSeq();
+    let port = safePort(req.port, 8000);
     let modelPath = req.model_path || req.model_id || "custom";
     if (backend === "ollama") {
       port = OLLAMA_PORT;
+      // A missing model name used to fall through as undefined and only failed
+      // at start time with "加载 undefined" (DESK-18).
       modelPath = req.model_name || req.model_path || req.model_id;
+      if (!modelPath) throw new Error("ollama 部署必须提供 model_name（或 model_path）");
     }
+    // The docker-only fields are validated before anything is stored, and a
+    // rejection reaches the caller as a 400 (docs/docker-design.md §5).
+    const docker = backend === "docker" ? validateDockerFields(req) : null;
     const host = "127.0.0.1";
     const item = {
       id,
@@ -345,6 +555,16 @@ class Deployments {
       hardware: req.hardware || null,
       log: [],
     };
+    if (docker) {
+      item.image = docker.image;
+      item.gpus = docker.gpus;
+      item.volumes = docker.volumes;
+      item.extra_args = docker.extra_args;
+      item.container_port = docker.container_port;
+      // Resolved here so _dockerArgv stays pure, and the host directory is
+      // created before the mount is used.
+      this._ensureHfCache(item);
+    }
     this.items.set(id, item);
     this._save();
     return item;
@@ -413,9 +633,26 @@ class Deployments {
     if (item.backend === "ollama") return this._runOllama(item, gen);
     if (item.backend === "llama.cpp" || item.backend === "llamacpp") return this._runLlama(item, gen);
     if (item.backend === "mlx") return this._runMlx(item, gen);
+    if (item.backend === "docker") return this._runDocker(item, gen);
     item.status = "BLOCKED";
-    this._log(item, item.backend + " 在桌面端不支持。本机可用：ollama、llama.cpp" +
-      (process.platform === "darwin" && process.arch === "arm64" ? "、mlx" : "") + "。");
+    // "桌面端不支持" on its own told the user nothing: not why, not what to do
+    // next (gap 5). Spell both out, reusing the GPU/Docker assessment.
+    const caps = await this._caps();
+    if (item.backend === "transformers") {
+      this._log(item, "transformers 的 runtime 在控制面服务端" +
+        "（backend/app/runtimes/transformers_server.py），桌面端本地没有这个模块" +
+        "——这不是没装的问题，装了也一样跑不起来。");
+      this._log(item, "下一步：在控制面所在的机器上部署它；本机想跑本地模型请用 ollama 或 mlx。");
+    } else if (item.backend === "vllm" || item.backend === "sglang") {
+      this._log(item, item.backend + " 官方只发 Linux wheel，没有 macOS 版本，桌面端无法本地启动。");
+      this._log(item, "为什么：" + gpuPath(caps));
+      this._log(item, "下一步：" + (caps.platform === "darwin"
+        ? "本机请用 mlx（Apple Silicon 上对标 vLLM），或用 docker 后端跑 CPU 镜像。"
+        : "Linux + NVIDIA 机器上装 Docker 后用 docker 后端，或 python3 -m pip install " + item.backend + "。"));
+    } else {
+      this._log(item, item.backend + " 在桌面端不支持。本机可用：ollama、llama.cpp" +
+        (process.platform === "darwin" && process.arch === "arm64" ? "、mlx" : "") + "。");
+    }
     this._save();
   }
 
@@ -610,6 +847,114 @@ class Deployments {
     return false;
   }
 
+  // Pure: reads only the item and the window. No disk, no process, so the shape
+  // is testable without Docker (docs/docker-design.md §4).
+  _dockerArgv(item, window) {
+    const image = item.image || DEFAULT_DOCKER_IMAGE;
+    const containerPort = item.container_port || inferContainerPort(image);
+    const argv = [
+      "docker", "run", "--rm", "--name", "mdp-" + item.id,
+      "-p", "127.0.0.1:" + item.port + ":" + containerPort,
+    ];
+    // "none" means no GPU at all, so the flag is omitted rather than passed
+    // through as an empty value.
+    if (item.gpus !== "none") argv.push("--gpus", item.gpus || "all");
+    for (const v of item.volumes || []) {
+      argv.push("-v", v.host + ":" + v.container + (v.ro ? ":ro" : ""));
+    }
+    argv.push("-e", "HF_HOME=/hf");
+    // Normally mounted so --rm does not discard downloaded weights between
+    // starts. But if the user already mounted something at /hf, adding ours
+    // second would silently override their choice (Docker mounts the later
+    // target). Skip ours and let the explicit volume win; HF_HOME stays /hf
+    // either way.
+    const userHfMount = (item.volumes || []).some((v) => v.container === "/hf");
+    if (!userHfMount) {
+      argv.push("-v", (item.hf_cache || this._hfCachePath()) + ":/hf");
+    }
+    argv.push(image);
+    if (image.indexOf("vllm") >= 0) {
+      argv.push("--model", item.model_path, "--host", "0.0.0.0",
+        "--port", String(containerPort), "--max-model-len", String(window));
+    } else if (image.indexOf("sglang") >= 0) {
+      argv.push("--model-path", item.model_path, "--host", "0.0.0.0",
+        "--port", String(containerPort), "--context-length", String(window));
+    }
+    for (const a of item.extra_args || []) argv.push(a);
+    return argv;
+  }
+
+  async _runDocker(item, gen) {
+    if (process.platform === "darwin") {
+      // Allowed (CPU images work), but never pretend a Mac container has a GPU.
+      this._log(item, "警告：" + gpuPath({ platform: "darwin", docker: true, nvidia: false }));
+    }
+    const plan = await this._plan(item, "docker");
+    if (this._stale(item, gen)) return;
+    const window = safeWindow(plan.window) || DEFAULT_WINDOW;
+    // Re-ensure the cache dir for records loaded from disk; _dockerArgv always
+    // mounts it.
+    this._ensureHfCache(item);
+    const argv = this._dockerArgv(item, window);
+    item.command = argv;
+    this._log(item, "命令：" + argv.join(" "));
+    for (const w of plan.warnings) this._log(item, "警告：" + w);
+
+    // Clear any container left behind by a previous hard kill before reusing
+    // the name (docs/docker-design.md §4.1).
+    await this._dockerRemove(item);
+    if (this._stale(item, gen)) return;
+
+    let proc;
+    try {
+      proc = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      item.status = "FAILED";
+      this._log(item, "无法启动 docker：" + e.message);
+      this._save();
+      return;
+    }
+    this.procs.set(item.id, { proc, kind: "server" });
+    item.pid = proc.pid;
+
+    const onData = (buf) => {
+      const text = String(buf).replace(/\r/g, "").trim();
+      if (text) this._log(item, text.split("\n").pop());
+    };
+    proc.stdout.on("data", onData);
+    proc.stderr.on("data", onData);
+    proc.on("error", (e) => {
+      item.status = "FAILED";
+      this._log(item, "无法启动 docker：" + e.message);
+      this._save();
+    });
+    proc.on("close", (code) => {
+      const cur = this.procs.get(item.id);
+      if (cur && cur.proc === proc) this.procs.delete(item.id);
+      if (this._stale(item, gen)) return;
+      item.pid = null;
+      if (item.status !== "STOPPED") {
+        item.status = code === 0 ? "STOPPED" : "FAILED";
+        this._log(item, "docker run 退出，code=" + code);
+      }
+      this._save();
+    });
+
+    const healthy = await this._waitHealthy(item, START_TIMEOUT_S, gen);
+    if (this._stale(item, gen)) return;
+    if (healthy) {
+      item.status = "RUNNING";
+      this._log(item, "容器就绪：" + item.endpoint);
+    } else if (item.status === "STARTING") {
+      item.status = "FAILED";
+      this._log(item, "等待健康检查超时（" + START_TIMEOUT_S + "s），已终止进程");
+      await this._kill(proc, STOP_GRACE_MS);
+      // The CLI dying does not remove the container; delete it too.
+      await this._dockerRemove(item);
+    }
+    this._save();
+  }
+
   async _runOllama(item, gen) {
     const model = item.model_path;
     const tags = await this._ollamaTags();
@@ -781,7 +1126,12 @@ class Deployments {
     for (let i = 0; i < seconds; i += 1) {
       if (this._stale(item, gen)) return false;
       if (item.status === "STOPPED" || item.status === "FAILED") return false;
-      const code = await reachable(item.health_endpoint, 1500);
+      let code = await reachable(item.health_endpoint, 1500);
+      // Some images only expose the OpenAI-compatible surface. Fall back to
+      // /v1/models when /health is missing (docs/docker-design.md §9).
+      if (code === 404) {
+        code = await reachable("http://" + item.host + ":" + item.port + "/v1/models", 1500);
+      }
       if (code === 200) return true;
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -800,7 +1150,7 @@ class Deployments {
   // from the response is a single integer, clamped to a range where a context
   // window is even meaningful. Warnings are carried through as text, with
   // newlines stripped so they cannot forge extra log lines.
-  async _plan(item) {
+  async _plan(item, backend) {
     const fallback = { window: DEFAULT_WINDOW, warnings: [] };
     if (!this.service) return fallback;
     try {
@@ -810,7 +1160,7 @@ class Deployments {
         body: JSON.stringify({
           model_id: item.model_id,
           model_path: item.model_path,
-          backend: "llama.cpp",
+          backend: backend || "llama.cpp",
           port: item.port,
           quantization: item.quantization,
           hardware: item.hardware,
@@ -856,17 +1206,34 @@ class Deployments {
       const cur = this.procs.get(id);
       if (cur === entry) this.procs.delete(id);
     }
+    if (item.backend === "docker") {
+      // Killing the CLI is not enough: the container can outlive it and keep
+      // holding the host port (docs/docker-design.md §4.1).
+      await this._dockerRemove(item);
+    }
     if (item.backend === "ollama") {
-      try {
-        await fetch(OLLAMA_BASE + "/api/generate", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model: item.model_path, keep_alive: "0" }),
-          signal: AbortSignal.timeout(10000),
-        });
-        this._log(item, item.model_path + " 已从 Ollama 卸载");
-      } catch (e) {
-        // Unloading is best effort.
+      // Ollama keeps one copy of a model for the whole daemon. Unloading here
+      // would pull the model out from under another deployment that still
+      // references it (DESK-07).
+      const shared = [...this.items.values()].some((other) =>
+        other.id !== item.id &&
+        other.backend === "ollama" &&
+        other.model_path === item.model_path &&
+        (other.status === "RUNNING" || other.status === "STARTING"));
+      if (shared) {
+        this._log(item, item.model_path + " 仍被其他部署使用，保留在 Ollama 中");
+      } else {
+        try {
+          await fetch(OLLAMA_BASE + "/api/generate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: item.model_path, keep_alive: "0" }),
+            signal: AbortSignal.timeout(10000),
+          });
+          this._log(item, item.model_path + " 已从 Ollama 卸载");
+        } catch (e) {
+          // Unloading is best effort.
+        }
       }
     }
     item.status = "STOPPED";
@@ -882,8 +1249,11 @@ class Deployments {
     if (this.procs.has(id) || item.status === "RUNNING" || item.status === "STARTING") {
       await this.stop(id).catch(() => {});
     }
+    if (item.backend === "docker") await this._dockerRemove(item);
     this.procs.delete(id);
     this.items.delete(id);
+    // Remember the deletion so the merge in _save does not bring it back.
+    this._removed.add(id);
     this._save();
     return { id, deleted: true };
   }
@@ -898,6 +1268,12 @@ class Deployments {
     const item = this.items.get(id);
     if (!item) throw new Error("Deployment " + id + " not found");
     const url = item.health_endpoint;
+    // A deployment that is not RUNNING has no process of its own, so a 200 from
+    // this port belongs to some other deployment. Only RUNNING can be healthy
+    // (DESK-12).
+    if (item.status !== "RUNNING") {
+      return { deployment_id: id, url, healthy: false, status: item.status };
+    }
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
       return { deployment_id: id, url, status_code: r.status, healthy: r.status === 200, status: item.status };
@@ -963,4 +1339,4 @@ class Deployments {
   }
 }
 
-module.exports = { Deployments };
+module.exports = { Deployments, safePort, hasBinary };

@@ -37,7 +37,7 @@ select{cursor:pointer}
 .form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 .field{min-width:0}
 .field.wide{grid-column:1/-1}
-.field label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}
+.field label,.field .flabel{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}
 .pick{padding:2px 0}
 .pickname{font-size:19px;font-weight:750}
 .reason{display:inline-block;margin-top:8px;padding:4px 9px;border-radius:6px;background:#1d2340;color:#c7cdfd;font-size:12px}
@@ -82,7 +82,7 @@ details.card[open]>summary{margin-bottom:12px}
 </div>
 
 <div class="hw">
-  <div class="hwi"><div class="k">设备</div><div class="v" id="hw-device">—</div><div class="s" id="hw-type"></div></div>
+  <div class="hwi"><div class="k">设备</div><div class="v" id="hw-device">—</div><div class="s" id="hw-type"></div><div class="s" id="hw-arch"></div><div class="s" id="hw-confidence"></div></div>
   <div class="hwi"><div class="k">可用预算</div><div class="v" id="hw-budget">—</div><div class="s" id="hw-total"></div></div>
   <div class="hwi"><div class="k">硬件来源</div><div class="v" id="hw-source">—</div><div class="s" id="hw-trust"></div></div>
   <div class="hwi"><div class="k">运行服务</div><div class="v" id="hw-running">0</div><div class="s">当前部署实例</div></div>
@@ -106,6 +106,7 @@ details.card[open]>summary{margin-bottom:12px}
     <h2>部署</h2>
     <span class="muted" id="deploy-sub">创建 → 启动 → 健康检查</span>
     <span class="grow"></span>
+    <a href="#" style="font-size:12px;margin-right:10px" onclick="jump('service');return false">服务测试 →</a>
     <button class="primary" id="deploy-btn" onclick="createDeploy()">创建并启动</button>
   </div>
   <div id="deploy-advisory" class="advisory" style="display:none">
@@ -114,13 +115,24 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="actions"><button class="mini" onclick="copyAdvisory()">复制命令</button></div>
   </div>
   <div class="form">
-    <div class="field wide"><label>模型</label><select id="d-model" onchange="syncDeploy()"></select></div>
-    <div class="field"><label>后端</label><select id="d-backend" onchange="syncDeploy()">
+    <div class="field wide"><label for="d-model">模型</label><select id="d-model" onchange="syncDeploy()"></select></div>
+    <div class="field"><label for="d-backend">后端</label><select id="d-backend" onchange="syncDeploy()">
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option></select></div>
-    <div class="field"><label>端口</label><input id="d-port" type="number" value="11434"></div>
-    <div class="field wide"><label>模型路径 / Ollama 标签</label><input id="d-path" value="qwen3:8b"></div>
-    <div class="field wide"><label>模型名（OpenAI 请求用）</label><input id="d-name" value="qwen3:8b"></div>
+    <div class="field"><label for="d-port">端口</label><input id="d-port" type="number" min="1024" max="65535" step="1" value="11434"></div>
+    <div class="field wide"><label for="d-path">模型路径 / Ollama 标签</label><input id="d-path" value="qwen3:8b"></div>
+    <div class="field wide"><label for="d-name">模型名（OpenAI 请求用）</label><input id="d-name" value="qwen3:8b"></div>
+    <div class="field wide" id="d-docker" style="display:none">
+      <div class="form">
+        <div class="field"><label for="d-image">镜像</label><input id="d-image" type="text" value="vllm/vllm-openai:latest" spellcheck="false"></div>
+        <div class="field"><label for="d-gpus">GPU</label><select id="d-gpus">
+          <option value="all">all</option><option value="none">none</option>
+          <option value="0">0</option><option value="0,1">0,1</option></select></div>
+        <div class="field wide"><label for="d-volumes">数据卷（每行 host:container[:ro]，绝对路径）</label><textarea id="d-volumes" rows="2" placeholder="/Users/me/models:/models:ro"></textarea></div>
+        <div class="field wide"><label for="d-extra">额外参数（每行一个）</label><textarea id="d-extra" rows="2" placeholder="--max-model-len&#10;65536"></textarea></div>
+      </div>
+      <div class="advisory" id="d-docker-warn" style="display:none;margin-top:10px"></div>
+    </div>
   </div>
   <div id="d-list" class="log" style="margin-top:14px">暂无部署</div>
   <div class="muted" style="font-size:12px;margin:12px 0 5px">最近日志</div>
@@ -134,10 +146,10 @@ details.card[open]>summary{margin-bottom:12px}
     <span class="muted" id="svc-state">● 暂无运行服务</span>
   </div>
   <div class="form">
-    <div class="field"><label>部署实例</label><select id="t-dep"></select></div>
-    <div class="field"><label>模型名</label><input id="t-model" value="qwen3:8b"></div>
-    <div class="field wide"><label>提示词</label><textarea id="t-msg" rows="2">你好，请用一句话介绍你自己</textarea></div>
-    <div class="field"><label>最大 Token</label><input id="t-max" type="number" value="512"></div>
+    <div class="field"><label for="t-dep">部署实例</label><select id="t-dep"></select></div>
+    <div class="field"><label for="t-model">模型名</label><input id="t-model" value="qwen3:8b"></div>
+    <div class="field wide"><label for="t-msg">提示词</label><textarea id="t-msg" rows="2">你好，请用一句话介绍你自己</textarea></div>
+    <div class="field"><label for="t-max">最大 Token</label><input id="t-max" type="number" min="1" max="1048576" step="1" value="512"></div>
     <div class="field" style="display:flex;align-items:flex-end;gap:8px">
       <button class="primary" onclick="runTest()">发送测试</button>
       <button class="mini" onclick="healthCheck()">健康检查</button>
@@ -155,15 +167,15 @@ details.card[open]>summary{margin-bottom:12px}
 
 <details class="card" id="profile"><summary>硬件档案 · 手动修正 / 本机精确探测</summary>
   <div class="form">
-    <div class="field"><label>平台</label><select id="pf-platform"><option value="darwin">darwin</option><option value="win32">win32</option><option value="linux">linux</option><option value="unknown">unknown</option></select></div>
-    <div class="field"><label>架构</label><input id="pf-arch" placeholder="arm64 / x86_64"></div>
-    <div class="field"><label>CPU 核数</label><input id="pf-cores" type="number" min="1" max="1024"></div>
-    <div class="field"><label>内存 (GB)</label><input id="pf-ram" type="number" step="0.5" min="0.5" max="4096"></div>
-    <div class="field wide"><label>常见内存档位</label><div id="pf-presets"></div></div>
-    <div class="field wide"><label>GPU 名称</label><input id="pf-gpu" placeholder="Apple M4 Pro / NVIDIA GeForce RTX 4090"></div>
-    <div class="field"><label>显存 (GB，统一内存留空)</label><input id="pf-vram" type="number" step="0.5" min="0.5" max="4096"></div>
-    <div class="field"><label>统一内存 (UMA)</label><select id="pf-uma"><option value="true">是</option><option value="false">否</option></select></div>
-    <div class="field wide"><label>档案码 / 粘贴的 JSON</label><textarea id="pf-code" rows="2" placeholder="mdp1.xxxx.yyyy"></textarea></div>
+    <div class="field"><label for="pf-platform">平台</label><select id="pf-platform"><option value="darwin">darwin</option><option value="win32">win32</option><option value="linux">linux</option><option value="unknown">unknown</option></select></div>
+    <div class="field"><label for="pf-arch">架构</label><input id="pf-arch" placeholder="arm64 / x86_64"></div>
+    <div class="field"><label for="pf-cores">CPU 核数</label><input id="pf-cores" type="number" min="1" max="1024"></div>
+    <div class="field"><label for="pf-ram">内存 (GB)</label><input id="pf-ram" type="number" step="0.5" min="0.5" max="4096"></div>
+    <div class="field wide"><div class="flabel">常见内存档位</div><div id="pf-presets"></div></div>
+    <div class="field wide"><label for="pf-gpu">GPU 名称</label><input id="pf-gpu" placeholder="Apple M4 Pro / NVIDIA GeForce RTX 4090"></div>
+    <div class="field"><label for="pf-vram">显存 (GB，统一内存留空)</label><input id="pf-vram" type="number" step="0.5" min="0.5" max="4096"></div>
+    <div class="field"><label for="pf-uma">统一内存 (UMA)</label><select id="pf-uma"><option value="true">是</option><option value="false">否</option></select></div>
+    <div class="field wide"><label for="pf-code">档案码 / 粘贴的 JSON</label><textarea id="pf-code" rows="2" placeholder="mdp1.xxxx.yyyy"></textarea></div>
   </div>
   <div class="actions">
     <button class="primary" onclick="applyProfileForm()">应用并重新推荐</button>
@@ -290,7 +302,7 @@ async function resolveProfile(){
       ((d.warnings&&d.warnings.length)?'\n\n警告:\n- '+d.warnings.join('\n- '):'')+
       ramHint();
   }catch(e){document.getElementById('pf-out').textContent='解析失败：'+e;}
-  refresh();
+  await refresh();
 }
 async function copyCode(){
   try{
@@ -339,6 +351,115 @@ function renderPresets(){
   }).join('');
 }
 
+// --- 输入校验（F-10）与 docker 表单解析（契约 §5 / §8） ---
+function validPort(n){return Number.isInteger(n)&&n>=1024&&n<=65535;}
+function validMaxTokens(n){return Number.isInteger(n)&&n>=1&&n<=1048576;}
+function validGpus(s){return s==='all'||s==='none'||/^[0-9]+(,[0-9]+)*$/.test(s);}
+function validImage(s){return /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$/.test(s);}
+// 每行 host:container[:ro]；最后一段是 ro 才是只读。host 与 container 必须绝对路径。
+// 契约里路径不允许含冒号，所以按 ':' 拆是安全的。空行直接跳过。
+function parseVolumes(text){
+  var out=[],errors=[];
+  String(text===undefined||text===null?'':text).split('\n').forEach(function(raw){
+    var line=raw.trim();
+    if(!line){return;}
+    var parts=line.split(':');
+    var ro=false;
+    if(parts.length>1&&parts[parts.length-1].toLowerCase()==='ro'){ro=true;parts.pop();}
+    if(parts.length!==2){errors.push(line);return;}
+    var host=parts[0].trim(),container=parts[1].trim();
+    if(host.charAt(0)!=='/'||container.charAt(0)!=='/'){errors.push(line);return;}
+    out.push({host:host,container:container,ro:ro});
+  });
+  return {volumes:out,errors:errors};
+}
+// 每行一个参数（不是空格分隔），带空格的路径才不会裂开。空行去掉。
+function parseExtraArgs(text){
+  var out=[],errors=[];
+  String(text===undefined||text===null?'':text).split('\n').forEach(function(raw){
+    var line=raw.trim();
+    if(!line){return;}
+    if(line.length>200){errors.push(line);return;}
+    out.push(line);
+  });
+  return {args:out,errors:errors};
+}
+// macOS 上容器拿不到 GPU：桌面端探测的 caps 与 gpuPath() 文案都在 CONFIG 里。
+function dockerGpuText(){
+  var caps=(CONFIG&&CONFIG.caps)||null;
+  var un=(CONFIG&&CONFIG.unavailable)||{};
+  var inst=(CONFIG&&CONFIG.installable)||{};
+  var fromPlan=(un.vllm&&un.vllm.gpu)||(inst.vllm&&inst.vllm.gpu)||'';
+  if(CONFIG&&CONFIG.local===true&&caps&&caps.platform==='darwin'){
+    return fromPlan||'macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），容器这条路在 Mac 上不通。';
+  }
+  if(caps&&caps.docker===false){
+    return '本机没有运行中的 Docker 守护进程，容器部署会失败：请先启动 Docker Desktop。';
+  }
+  return '';
+}
+function updateDockerBlock(){
+  var block=document.getElementById('d-docker');
+  if(!block){return;}
+  var backend=document.getElementById('d-backend').value;
+  block.style.display=backend==='docker'?'':'none';
+  var warn=document.getElementById('d-docker-warn');
+  if(warn){
+    var text=backend==='docker'?dockerGpuText():'';
+    warn.style.display=text?'block':'none';
+    warn.textContent=text;
+  }
+}
+var CONF_TEXT={verified:'实测与查表一致',measured:'实测值',disputed:'与型号标称不符，请确认',unverified:'按型号查表，未实测',confirmed:'已手动确认'};
+function confidenceOf(rec){
+  if(!rec){return '';}
+  var c=rec.confidence;
+  if(!c&&rec.normalized_profile){c=rec.normalized_profile.confidence;}
+  if(!c&&rec.hardware){c=rec.hardware.confidence;}
+  return typeof c==='string'?c:'';
+}
+// 设备类型与容量放一行；CPU 架构与置信度各占一行，没有值就不渲染。
+// 容量优先取 total_device_gb：它是设备的物理容量，usable_vram_gb 是扣掉余量
+// 后的规划预算；UMA 上 total_device_gb 就是统一内存池。
+function renderHardware(rec){
+  var h=rec.hardware||{};
+  document.getElementById('hw-device').textContent=h.device_name||'—';
+  var cap=(h.total_device_gb===null||h.total_device_gb===undefined||h.total_device_gb===0)?h.usable_vram_gb:h.total_device_gb;
+  var conf=confidenceOf(rec);
+  // 只有「查表得来」的值才提示待确认；实测/已确认的值不需要。
+  var fromTable=(conf==='unverified'||conf==='disputed'||(!conf&&!rec.hardware_trusted));
+  var typeEl=document.getElementById('hw-type');
+  typeEl.style.display='';
+  typeEl.innerHTML=esc((h.uma?'统一内存':'独立显存')+' · '+fmt(cap))+
+    (fromTable?'（按型号查表） <a href="#" onclick="jump(\'profile\');return false">不对？改</a>':'');
+  var archEl=document.getElementById('hw-arch');
+  var arch=(rec.normalized_profile&&rec.normalized_profile.architecture)||'';
+  if(arch&&arch!=='unknown'){archEl.textContent='CPU 架构 · '+arch;archEl.style.display='';}
+  else{archEl.textContent='';archEl.style.display='none';}
+  var confEl=document.getElementById('hw-confidence');
+  var confText=CONF_TEXT[conf]||'';
+  if(confText){
+    confEl.textContent=confText;
+    confEl.className='s'+(conf==='disputed'?' warn':'');
+    confEl.style.display='';
+  } else {confEl.textContent='';confEl.className='s';confEl.style.display='none';}
+  document.getElementById('hw-budget').textContent=fmt(h.usable_vram_gb);
+  document.getElementById('hw-total').textContent='总容量 '+fmt(h.total_device_gb);
+  document.getElementById('hw-source').textContent=(rec.hardware_source||'—');
+  document.getElementById('hw-trust').textContent=rec.hardware_trusted?'服务器实测':'客户端提交，需确认';
+}
+// 后端不可用时不能停在「正在检测…」：状态行与硬件卡片一起回到未知态（F-03）。
+function resetStatus(){
+  var dot=document.getElementById('status-dot'); if(dot){dot.className='dot';}
+  var text=document.getElementById('status-text'); if(text){text.textContent='无法连接后端';}
+  ['hw-device','hw-budget','hw-source'].forEach(function(id){var el=document.getElementById(id);if(el){el.textContent='—';}});
+  var total=document.getElementById('hw-total'); if(total){total.textContent='';}
+  var trust=document.getElementById('hw-trust'); if(trust){trust.textContent='';}
+  ['hw-type','hw-arch','hw-confidence'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el){el.textContent='';el.className='s';el.style.display='none';}
+  });
+}
 async function refresh(){
   var backend=document.getElementById('backend').value||'ollama';
   var env,rec;
@@ -356,12 +477,7 @@ async function refresh(){
   }
   if(rec){
     var h=rec.hardware||{};
-    document.getElementById('hw-device').textContent=h.device_name||'—';
-    document.getElementById('hw-type').textContent=(h.uma?'统一内存':'独立显存')+' · '+(rec.normalized_profile&&rec.normalized_profile.architecture||'');
-    document.getElementById('hw-budget').textContent=fmt(h.usable_vram_gb);
-    document.getElementById('hw-total').textContent='总容量 '+fmt(h.total_device_gb);
-    document.getElementById('hw-source').textContent=(rec.hardware_source||'—');
-    document.getElementById('hw-trust').textContent=rec.hardware_trusted?'服务器实测':'客户端提交，需确认';
+    renderHardware(rec);
     var warn=(rec.hardware_warnings||[]);
     document.getElementById('budget-log').textContent=
       'source: '+rec.hardware_source+'\nclient_is_local: '+rec.client_is_local+
@@ -371,8 +487,10 @@ async function refresh(){
     renderStatus(rec);
     renderPick(rec); renderRows(rec); fillDeployModels(rec);
   } else {
+    resetStatus();
     document.getElementById('pick').textContent='后端未启动';
     document.getElementById('rows').textContent='后端未启动';
+    document.getElementById('budget-log').textContent='—';
   }
   refreshDeployments();
 }
@@ -426,7 +544,7 @@ function renderRows(rec){
 var DEPLOY_MODELS=[];
 function fillDeployModels(rec){
   var sel=document.getElementById('d-model');
-  var rows=(rec.recommendations||[]).filter(function(r){return r.fits;});
+  var rows=(rec.recommendations||[]).filter(function(r){return r.fits&&r.reason_key!=='backend-incompatible';});
   DEPLOY_MODELS=rows.map(function(r){
     return {id:r.id,name:r.name,ollama:(r.source&&r.source.ollama)||'',path:(r.source&&r.source.huggingface)||r.id};
   });
@@ -438,7 +556,7 @@ function fillDeployModels(rec){
 // Both backend dropdowns were hardcoded to the full list, so an unavailable
 // backend could be picked and the deployment only failed at start. The data was
 // already being fetched into CONFIG; this is what uses it.
-var ALL_BACKENDS=['ollama','llama.cpp','mlx','transformers','vllm','sglang'];
+var ALL_BACKENDS=['ollama','llama.cpp','mlx','transformers','vllm','sglang','docker'];
 
 // What this machine can do about one backend, from the desktop's own probe.
 // 'installable' means there is a command that would fix it; 'unavailable' means
@@ -490,6 +608,10 @@ function fillBackends(){
         // machine cannot run, and the modal is where the user acts instead.
         var good=sel.querySelector('option:not([data-needs-install])');
         if(good){sel.selectedIndex=good.index;}
+        // Reverting is a programmatic change, so the inline onchange does not
+        // fire again: hide the docker block here or it would linger while the
+        // select already points at another backend.
+        updateDockerBlock();
         openInstallModal(chosen);
       });
     }
@@ -499,6 +621,7 @@ function fillBackends(){
     var missing=ALL_BACKENDS.filter(function(b){return backendStatus(b).kind!=='ready';});
     hint.textContent=missing.length?'下拉里带「未安装」的项可以直接点，会告诉你缺什么、能不能装':' ';
   }
+  updateDockerBlock();
 }
 
 // --- 后端安装 ---------------------------------------------------------------
@@ -621,6 +744,7 @@ function currentModel(){
   return DEPLOY_MODELS[+sel.value]||null;
 }
 function syncDeploy(){
+  updateDockerBlock();
   var m=currentModel(); if(!m) return;
   var backend=document.getElementById('d-backend').value;
   if(backend==='ollama'){
@@ -659,7 +783,9 @@ function copyAdvisory(){copyText(document.getElementById('advisory-cmd').textCon
 function usePick(){
   var rec=LAST; if(!rec||!rec.recommendation){return;}
   var sel=document.getElementById('d-model');
-  for(var i=0;i<sel.options.length;i++){try{var v=JSON.parse(sel.options[i].value);if(v.id===rec.recommendation.id){sel.selectedIndex=i;break;}}catch(e){}}
+  // Options carry an index now (see fillDeployModels); the payload is in
+  // DEPLOY_MODELS. Parsing option.value as JSON could never match.
+  for(var i=0;i<DEPLOY_MODELS.length;i++){if(DEPLOY_MODELS[i].id===rec.recommendation.id){sel.selectedIndex=i;break;}}
   syncDeploy();
   jump('deploy');
 }
@@ -673,25 +799,46 @@ async function refreshDeployments(){
     var cls=d.status==='RUNNING'?'ok':(d.status==='FAILED'||d.status==='BLOCKED'?'bad':'warn');
     html+='<tr><td>'+esc(d.id)+'</td><td>'+esc(d.model_path)+'</td><td>'+esc(d.backend)+'</td>';
     html+='<td><span class="'+cls+'">'+esc(d.status)+'</span></td><td class="muted">'+esc(d.endpoint)+'</td>';
-    html+='<td><button class="mini" onclick="depStart(\''+d.id+'\')">启动</button> <button class="mini" onclick="depStop(\''+d.id+'\')">停止</button> <button class="mini" onclick="depLogs(\''+d.id+'\')">日志</button> <button class="mini" onclick="depDelete(\''+d.id+'\')">删除</button></td></tr>';
+    // Action ids go through data attributes, not an inline onclick: esc() escapes
+    // quotes for HTML, but a value spliced into JS source would still break out.
+    html+='<td><button class="mini" data-dep-action="start" data-dep-id="'+esc(d.id)+'">启动</button> <button class="mini" data-dep-action="stop" data-dep-id="'+esc(d.id)+'">停止</button> <button class="mini" data-dep-action="logs" data-dep-id="'+esc(d.id)+'">日志</button> <button class="mini" data-dep-action="delete" data-dep-id="'+esc(d.id)+'">删除</button></td></tr>';
   });
   document.getElementById('d-list').innerHTML=DEPLOYMENTS.length?html+'</tbody></table>':'暂无部署';
   clearTimeout(window.__depPoll);
   if(DEPLOYMENTS.some(function(d){return d.status==='STARTING';})){window.__depPoll=setTimeout(refreshDeployments,3000);}
   var tsel=document.getElementById('t-dep');
+  var prevId=tsel.value;
   tsel.innerHTML=DEPLOYMENTS.map(function(d){return '<option value="'+esc(d.id)+'" data-model="'+esc(d.model_path)+'">'+esc(d.id)+' · '+esc(d.model_path)+' · '+esc(d.status)+'</option>';}).join('');
-  onTestDepChange();
+  // A poll must not yank the instance the user picked out from under them.
+  if(prevId){
+    for(var i=0;i<tsel.options.length;i++){if(tsel.options[i].value===prevId){tsel.selectedIndex=i;break;}}
+  }
+  onTestDepChange(prevId!==''&&tsel.value===prevId);
 }
-function onTestDepChange(){
+// keepModel=true means the selected deployment did not change, so leave the
+// model name the user may be editing alone.
+function onTestDepChange(keepModel){
   var sel=document.getElementById('t-dep');
   var opt=sel.options[sel.selectedIndex];
-  if(opt&&opt.dataset.model){document.getElementById('t-model').value=opt.dataset.model;}
+  if(keepModel!==true&&opt&&opt.dataset.model){document.getElementById('t-model').value=opt.dataset.model;}
   var d=DEPLOYMENTS.filter(function(x){return x.id===sel.value;})[0];
   document.getElementById('t-endpoint').textContent=d?d.endpoint+'\n健康检查: '+d.health_endpoint:'—';
 }
 function depLogs(id){var d=DEPLOYMENTS.filter(function(x){return x.id===id;})[0];document.getElementById('d-log').textContent=(d&&d.log&&d.log.length)?d.log.join('\n'):'（无日志）';}
-async function depStart(id){await fetch('/api/deployments/'+id+'/start',{method:'POST'});refreshDeployments();}
-async function depStop(id){await fetch('/api/deployments/'+id+'/stop',{method:'POST'});refreshDeployments();}
+async function depStart(id){
+  try{
+    var r=await fetch('/api/deployments/'+id+'/start',{method:'POST'});
+    if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='启动失败：'+(d.detail||r.status);}
+  }catch(e){document.getElementById('d-log').textContent='启动失败：'+(e&&e.message||e);}
+  refreshDeployments();
+}
+async function depStop(id){
+  try{
+    var r=await fetch('/api/deployments/'+id+'/stop',{method:'POST'});
+    if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='停止失败：'+(d.detail||r.status);}
+  }catch(e){document.getElementById('d-log').textContent='停止失败：'+(e&&e.message||e);}
+  refreshDeployments();
+}
 async function depDelete(id){
   if(!confirm('删除部署 '+id+'？正在运行的会先停止。')){return;}
   try{
@@ -703,22 +850,46 @@ async function depDelete(id){
 }
 async function createDeploy(){
   var m=currentModel();
+  var backend=document.getElementById('d-backend').value;
+  var port=+document.getElementById('d-port').value;
+  var log=document.getElementById('d-log');
+  if(!validPort(port)){log.textContent='端口必须是 1024~65535 的整数，当前是「'+document.getElementById('d-port').value+'」。';return;}
   var body={model_path:document.getElementById('d-path').value,model_id:m?m.id:'custom',
-    model_name:document.getElementById('d-name').value,backend:document.getElementById('d-backend').value,
-    port:+document.getElementById('d-port').value};
+    model_name:document.getElementById('d-name').value,backend:backend,
+    port:port};
+  // The docker fields are only meaningful for backend === "docker"; other
+  // backends must not receive them (contract §2).
+  if(backend==='docker'){
+    var v=parseVolumes(document.getElementById('d-volumes').value);
+    var e=parseExtraArgs(document.getElementById('d-extra').value);
+    var image=document.getElementById('d-image').value.trim()||'vllm/vllm-openai:latest';
+    var gpus=document.getElementById('d-gpus').value||'all';
+    if(!validImage(image)){log.textContent='镜像名不合法（不允许空白、引号、分号、$、反引号等）：'+image;return;}
+    if(!validGpus(gpus)){log.textContent='GPU 选择不合法：'+gpus;return;}
+    if(v.errors.length){log.textContent='数据卷格式不对（每行 host:container[:ro]，host 与 container 必须是绝对路径）：'+v.errors.join('；');return;}
+    if(v.volumes.length>8){log.textContent='数据卷最多 8 条。';return;}
+    if(e.errors.length){log.textContent='额外参数每项不能超过 200 字符：'+e.errors.join('；');return;}
+    if(e.args.length>32){log.textContent='额外参数最多 32 项。';return;}
+    body.image=image;
+    body.gpus=gpus;
+    body.volumes=v.volumes;
+    body.extra_args=e.args;
+  }
   try{
     var r=await fetch('/api/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     var d=await r.json();
-    if(!r.ok){document.getElementById('d-log').textContent='被拒绝：'+(d.detail||r.status);return;}
-    document.getElementById('d-log').textContent='已创建 '+d.id+'，正在启动…';
+    if(!r.ok){log.textContent='被拒绝：'+(d.detail||r.status);return;}
+    log.textContent='已创建 '+d.id+'，正在启动…';
     await fetch('/api/deployments/'+d.id+'/start',{method:'POST'});
     await refreshDeployments();
     depLogs(d.id);
-  }catch(e){document.getElementById('d-log').textContent='创建失败：'+e;}
+  }catch(e){log.textContent='创建失败：'+e;}
 }
 async function runTest(){
   var id=document.getElementById('t-dep').value;
   if(!id){document.getElementById('t-out').textContent='请先创建部署';return;}
+  var maxTokens=+document.getElementById('t-max').value;
+  if(!validMaxTokens(maxTokens)){document.getElementById('t-out').textContent='最大 Token 必须是 1~1048576 的整数。';return;}
   document.getElementById('t-out').textContent='请求中…';
   try{
     var r=await (await fetch('/api/deployments/'+id+'/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
@@ -729,10 +900,25 @@ async function runTest(){
 }
 async function healthCheck(){
   var id=document.getElementById('t-dep').value; if(!id){return;}
-  var r=await (await fetch('/api/deployments/'+id+'/health')).json();
-  document.getElementById('t-out').innerHTML=(r.healthy?'<span class="ok">健康</span>':'<span class="bad">不健康</span>')+' '+esc(r.url)+' '+esc(r.error||r.status_code||'');
+  var out=document.getElementById('t-out');
+  try{
+    var r=await fetch('/api/deployments/'+id+'/health');
+    var d=await r.json().catch(function(){return {};});
+    if(!r.ok){out.innerHTML='<span class="bad">健康检查失败</span> '+esc(d.detail||r.status);return;}
+    out.innerHTML=(d.healthy?'<span class="ok">健康</span>':'<span class="bad">不健康</span>')+' '+esc(d.url)+' '+esc(d.error||d.status_code||'');
+  }catch(e){out.innerHTML='<span class="bad">健康检查失败</span> '+esc(e&&e.message||e);}
 }
-document.getElementById('t-dep').addEventListener('change',onTestDepChange);
+document.getElementById('t-dep').addEventListener('change',function(){onTestDepChange();});
+document.getElementById('d-list').addEventListener('click',function(ev){
+  var btn=ev.target&&ev.target.closest?ev.target.closest('button[data-dep-action]'):null;
+  if(!btn){return;}
+  var id=btn.getAttribute('data-dep-id');
+  var action=btn.getAttribute('data-dep-action');
+  if(action==='start'){depStart(id);}
+  else if(action==='stop'){depStop(id);}
+  else if(action==='logs'){depLogs(id);}
+  else if(action==='delete'){depDelete(id);}
+});
 (async function init(){
   try{CONFIG=await (await fetch('/api/backends')).json();}catch(e){CONFIG={};}
   fillBackends();

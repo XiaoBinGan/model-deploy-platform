@@ -93,7 +93,32 @@ const allTools = () => Promise.resolve(true);
     mlxPlan.steps.every((s) => Array.isArray(s.argv) && s.argv.length > 0));
   check("mlx 的第一步是建 venv", mlxPlan.steps[0].argv.indexOf("venv") >= 0, mlxPlan.steps[0].argv.join(" "));
   check("每个后端都有说明文案",
-    ["ollama", "llama.cpp", "mlx", "vllm", "sglang", "transformers"].every((b) => BACKEND_INFO[b]));
+    ["ollama", "llama.cpp", "mlx", "vllm", "sglang", "transformers", "docker"].every((b) => BACKEND_INFO[b]));
+
+  // --- docker install plan (docs/docker-design.md §7) -----------------------
+  const noDocker = (n) => Promise.resolve(n !== "docker");
+  const macNoDocker = { ...mac, has: noDocker };
+  const winNoDocker = { ...win, has: noDocker };
+  const linNoDocker = { ...lin, has: noDocker };
+
+  const dmac = await installPlan("docker", macNoDocker);
+  check("docker 在 mac 有 brew 时可装", dmac.ok, dmac.ok ? "" : dmac.reason);
+  check("docker 安装计划用 brew --cask docker",
+    dmac.ok && dmac.steps[0].argv.join(" ") === "brew install --cask docker",
+    dmac.ok ? dmac.steps[0].argv.join(" ") : dmac.reason);
+  const dwin = await installPlan("docker", winNoDocker);
+  check("docker 在 win 有 winget 时可装",
+    dwin.ok && dwin.steps[0].argv.indexOf("Docker.DockerDesktop") >= 0,
+    dwin.ok ? dwin.steps[0].argv.join(" ") : dwin.reason);
+  const dlin = await installPlan("docker", linNoDocker);
+  check("docker 在 linux 上 cannot（不猜发行版命令）", !dlin.ok, dlin.ok ? "ok" : dlin.reason);
+  check("docker linux 理由说明需要 root", !dlin.ok && dlin.reason.indexOf("root") >= 0, dlin.reason);
+  check("docker linux 不给 curl|sh 之类命令",
+    !dlin.ok && dlin.manual.indexOf("|") < 0 && dlin.manual.indexOf("get.docker.com") < 0, dlin.manual);
+  const ddown = await installPlan("docker", mac);
+  check("docker 已装但守护进程没起来时给启动说明",
+    ddown.ok && ddown.steps.length === 0 && ddown.manual.indexOf("守护进程") >= 0, ddown.manual);
+  check("docker 也带上 GPU/Docker 判断", typeof dmac.gpu === "string" && dmac.gpu.length > 0);
 
   // --- the step runner ------------------------------------------------------
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-install-"));

@@ -30,11 +30,14 @@ def test_remote_deploy_is_blocked_by_default():
 
 
 def test_local_deploy_is_allowed():
-    dep = main.create_deployment(
+    # This is the trust boundary, not a status check: a local caller is let
+    # through (no 403), while the remote case above is blocked. Creating an
+    # unavailable backend now honestly reports BLOCKED, which is not asserted
+    # away here.
+    main.create_deployment(
         main.DeployRequest(model_path="/models/x", model_id="x", backend="transformers"),
         _request("127.0.0.1"),
     )
-    assert dep["status"] == "CREATED"
 
 
 def test_apple_gpu_is_unified_memory():
@@ -150,7 +153,11 @@ def test_planner_sizes_for_client_profile_not_server():
     assert out["hardware"]["uma"] is False
     assert 9.5 < out["hardware"]["usable_vram_gb"] < 10.5
     assert out["command"][0] == "llama-server"
-    assert out["decision"]["planned_window"] >= 64 * 1024
+    # B-08 invariant: the planned window is capped by the model's native
+    # context, never by the 64K floor. Compute it, do not hardcode a number.
+    from app.services.catalog import CATALOG
+    entry = next(e for e in CATALOG if e.id == "qwen3-8b")
+    assert 1 <= out["decision"]["planned_window"] <= entry.native_ctx
 
 
 def test_planner_uses_server_probe_without_profile():
@@ -158,4 +165,115 @@ def test_planner_uses_server_probe_without_profile():
 
     out = planner.preview(planner.PlanRequest(model_id="qwen3-8b", backend="llama.cpp", port=8080))
     assert out["hardware_source"] == "server"
+
+
+# --- cross-validation confidence (docs/probe-session-design.md section 6) -----
+
+def test_confidence_values_are_the_frozen_enum():
+    assert set(hardware.CONFIDENCE_VALUES) == {
+        "verified", "measured", "disputed", "unverified", "confirmed",
+    }
+
+
+def test_confidence_verified_when_measured_matches_the_table():
+    result = hardware.budget_from_profile({
+        "source": "agent",
+        "gpus": [{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia",
+                  "vram_gb": 24, "uma": False}],
+    })
+    assert result.confidence == "verified"
+    assert result.to_dict()["confidence"] == "verified"
+
+
+def test_confidence_measured_when_the_table_has_no_entry():
+    result = hardware.budget_from_profile({
+        "source": "agent",
+        "gpus": [{"name": "Totally Unknown Accelerator 9999", "vendor": "unknown",
+                  "vram_gb": 16, "uma": False}],
+    })
+    assert result.confidence == "measured"
+
+
+def test_confidence_disputed_takes_measured_and_warns():
+    result = hardware.budget_from_profile({
+        "source": "agent",
+        "gpus": [{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia",
+                  "vram_gb": 48, "uma": False}],
+    })
+    assert result.confidence == "disputed"
+    assert "显存与型号标称不符（实测 48.0 GB / 查表 24.0 GB），请确认" in result.warnings
+    # "取实测": the measured 48 GB is what the budget is priced against.
+    assert result.budget.total_device_gb == 48.0
+
+
+def test_confidence_unverified_for_a_browser_lookup_only():
+    result = hardware.budget_from_profile({
+        "source": "browser",
+        "gpus": [{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia",
+                  "vram_gb": 24, "uma": False}],
+    })
+    assert result.confidence == "unverified"
+
+
+def test_confidence_confirmed_marker_wins_and_suppresses_the_warning():
+    result = hardware.budget_from_profile({
+        "source": "agent",
+        "confirmed": True,
+        "gpus": [{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia",
+                  "vram_gb": 48, "uma": False}],
+    })
+    assert result.confidence == "confirmed"
+    assert not any("显存与型号标称不符" in w for w in result.warnings)
+
+
+def test_recommend_exposes_the_confidence_verdict():
+    out = recommend(RecommendRequest(
+        backend="ollama",
+        hardware={"source": "agent", "ram_gb": 24,
+                  "gpus": [{"name": "Apple M4", "vendor": "apple", "uma": True}]},
+    ))
+    assert out["confidence"] in hardware.CONFIDENCE_VALUES
+
+
+# --- B-15: spill-visible must be reachable from a client profile / UMA --------
+
+def test_spill_visible_is_reachable_for_a_client_uma_profile():
+    """On UMA the hard refusal is the physical pool, not the planning budget.
+
+    Before the fix physics_check used usable_vram for both the zero-spill gate
+    and the hard refusal, so a model between the two was called impossible and
+    spill-visible was unreachable.
+    """
+    from collections import Counter
+    from app.services.catalog import resolve
+
+    result = hardware.budget_from_profile({
+        "source": "agent", "ram_gb": 24,
+        "gpus": [{"name": "Apple M4", "vendor": "apple", "uma": True}],
+    })
+    choices = resolve(result.budget, backend="ollama")["choices"]
+    keys = Counter(c.reason_key for c in choices)
+    assert keys["spill-visible"] > 0, keys
+    # The zero-spill invariant is untouched: a spilling row is never zero-spill.
+    for choice in choices:
+        if choice.zero_spill:
+            assert choice.reason_key != "spill-visible"
+
+
+def test_spill_visible_is_reachable_for_a_client_discrete_profile():
+    """A client only reports total RAM, but that is still a physical ceiling."""
+    from collections import Counter
+    from app.services.catalog import resolve
+
+    result = hardware.budget_from_profile({
+        "source": "agent", "ram_gb": 32,
+        "gpus": [{"name": "NVIDIA GeForce RTX 3060", "vendor": "nvidia",
+                  "vram_gb": 12, "uma": False}],
+    })
+    choices = resolve(result.budget, backend="ollama")["choices"]
+    keys = Counter(c.reason_key for c in choices)
+    assert keys["spill-visible"] > 0, keys
+    for choice in choices:
+        if choice.zero_spill:
+            assert choice.reason_key != "spill-visible"
 

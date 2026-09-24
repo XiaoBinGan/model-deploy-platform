@@ -188,3 +188,47 @@ probeWindows() 代码在，但 iGPU/vendor 判定有实质错误；
 而用户实际会用到的那条路——手动探测脚本和它给出的命令——**在 Windows 上
 是直接不可用的**（内存恒为 None，命令语法不对）。
 再加上没有打包配置，目前 Windows 用户既测不出硬件，也拿不到安装包。
+
+---
+
+# 修复记录（B / C / F 节）
+
+本轮只动了 desktop/probe.js 与 desktop/smoke.js，未触碰 backend 的 PROBE_SCRIPT /
+probe.ps1 / platform 枚举 / 打包（D、E 节仍缺）。新增纯函数单测在
+desktop/test-server.js 中，本机（macOS）可跑；**B/C 节仍无 Windows 真机执行**，
+下面「验证」一栏区分静态审查与纯函数单测。
+
+## B 节（probeWindows）
+
+| 子项 | 修法 | 验证 |
+|---|---|---|
+| B1 集成显卡当独显 | 新增 windowsGpuIsUma()；独显（NVIDIA/RTX、Radeon RX/Pro/VII、Arc A/B 数字）先返回 false，集显（Intel HD/UHD/Iris/Arc Graphics、Radeon Graphics/Vega、Adreno，以及 AMD 三位数+M 核显 780M/760M/680M/890M）返回 true。集显 `vram_gb=null`，不再取 128MB 共享 carve-out。 | 纯函数单测 18 条 |
+| B2 vendor 只认 nvidia | 新增 classifyGpuVendor()，覆盖 nvidia / amd / intel / qualcomm / apple，并支持 driver vendor 提示。 | 纯函数单测 5 条 |
+| B3 nvidia-smi 无回退 | nvidiaSmiCandidates() 依次试 PATH、`%SystemRoot%\System32\nvidia-smi.exe`、`%ProgramFiles%\NVIDIA Corporation\NVSMI\nvidia-smi.exe`。 | 静态审查（Windows 上才能真跑） |
+| B4 多路 CPU 只取第一行 | PowerShell 改为 `Win32_Processor.Name` 去重后 `[string]::Join(' + ', $n)`。 | 静态审查 |
+| B5 Windows ARM64 | 无 nvidia-smi 时走注册表/CIM；Adreno/Qualcomm 判 UMA，按系统内存计。 | 纯函数单测 + 静态审查 |
+
+名字归一化：`normalizeGpuName()` 去掉 `(TM)/(R)/(C)` 与 ™®©、压平空白后再匹配，
+否则 `AMD Radeon(TM) Graphics` 会被误判成独显（这是本轮 review 抓到的真 bug）。
+
+## C 节（WSL2）
+
+`detectWsl()` 读 `/proc/version`，命中 `microsoft|wsl` 时在探测结果里写
+`wsl: true` 和 `wsl_note`，提示 `/proc/meminfo` 是 WSL 的内存限额。
+注意这与 backend `environment.py` 的 `shutil.which("wsl")`（宿主机上是否装了 wsl
+命令）不是一回事，后者未改。
+验证：macOS 上 `/proc/version` 不存在 → false（真实 probe 输出 `wsl:false`）；
+WSL 内部路径为静态审查。
+
+## F 节（smoke.js）
+
+`usable_vram_gb > 10.5` 改为相对断言：从 `/api/hardware/self` 推本机容量
+（UMA 取 ram_gb，独显取最大 vram），断言 `usable_vram_gb > 0 且 <= capacity`。
+M5 实测输出 `usable=19.2GB (self ram=24GB, capacity=24GB)`；4GB 独显机器
+capacity=4、usable≈2，也能通过。
+
+## 未做
+
+- D 节（platform 枚举归一化）、E 节（electron-builder / 打包 / 签名）不在本轮
+  文件所有权内，未动。
+- B/C 节未在 Windows / WSL 真机执行；所有 Windows 结论仍是静态审查 + 纯函数单测。

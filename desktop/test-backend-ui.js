@@ -10,6 +10,9 @@
 
 const { app, BrowserWindow } = require("electron");
 app.disableHardwareAcceleration();
+// The page is served over HTTP; without this Electron may hand back a stale
+// cached index.html from an earlier run instead of the file on disk.
+app.commandLine.appendSwitch("disable-http-cache");
 
 const URL = process.env.MDP_URL || "http://127.0.0.1:8790";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -64,7 +67,9 @@ const PICK = (name) => `(() => {
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1080, height: 900, show: false });
   try {
-    await win.loadURL(URL);
+    // Bust both the disk cache and any HTTP cache keyed on the bare URL.
+    await win.webContents.session.clearCache();
+    await win.loadURL(URL + (URL.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now());
   } catch (e) {
     console.log("  FAIL  打不开 " + URL + "：" + e.message);
     app.exit(1);
@@ -74,7 +79,7 @@ app.whenReady().then(async () => {
   await sleep(2500);
 
   const base = await win.webContents.executeJavaScript(PROBE);
-  check("下拉列出了全部后端", base.total === 6, "共 " + base.total);
+  check("下拉列出了全部后端", base.total === 7, "共 " + base.total);
   check("不可用的项被标记而不是被禁用",
     base.needs.length > 0 && !base.anyDisabled,
     "标记 " + base.needs.length + " 个，disabled=" + base.anyDisabled);

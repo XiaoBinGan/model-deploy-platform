@@ -3,6 +3,33 @@ Loads model once at startup, serves /v1/chat/completions and /v1/models.
 Intended for MVP validation with small models (<=3B)."""
 import argparse, json, time, uuid, sys, os
 
+from pathlib import Path
+
+
+def sse_chunks(model_name, reply, completion_id=None, created=None):
+    """OpenAI-compatible SSE frames for a completed reply.
+
+    `model.generate` is not incremental here, so the whole reply is delivered as
+    one content delta. What streaming clients actually parse is the framing: one
+    JSON object per `data:` line, terminated by `data: [DONE]`. B-20 in
+    docs/qa-findings-backend.md: the old code returned a single
+    application/json body, which any SSE client rejects.
+    """
+    completion_id = completion_id or f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created = int(time.time() if created is None else created)
+    base = {"id": completion_id, "object": "chat.completion.chunk",
+            "created": created, "model": model_name}
+
+    def frame(choices):
+        payload = dict(base, choices=choices)
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    yield frame([{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}])
+    yield frame([{"index": 0, "delta": {"content": reply}, "finish_reason": None}])
+    yield frame([{"index": 0, "delta": {}, "finish_reason": "stop"}])
+    yield "data: [DONE]\n\n"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
@@ -28,7 +55,7 @@ def main():
     print(f"[transformers_server] Model loaded. Starting server on {args.host}:{args.port}", flush=True)
 
     from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import StreamingResponse
     import uvicorn
 
     app = FastAPI(title="transformers inference server")
@@ -64,14 +91,12 @@ def main():
         reply = tokenizer.decode(generated, skip_special_tokens=True)
 
         if stream:
-            # Simplified: return full reply as one chunk
-            chunk = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                "object": "chat.completion.chunk",
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"content": reply}, "finish_reason": "stop"}],
-            }
-            return JSONResponse(content=chunk)
+            # Real SSE framing: one `data:` line per chunk, then `data: [DONE]`.
+            return StreamingResponse(
+                sse_chunks(model_name, reply),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
@@ -87,6 +112,5 @@ def main():
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
-from pathlib import Path
 if __name__ == "__main__":
     main()

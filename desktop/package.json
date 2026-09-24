@@ -3,14 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "description": "Model Deploy Platform 桌面端：本地硬件探测 + 本地部署",
+  "author": "ModelForge",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node smoke.js && node test-mlx.js && node test-trust.js && node test-install.js",
+    "test": "node smoke.js && node test-mlx.js && node test-trust.js && node test-install.js && node test-docker.js && node test-server.js",
+    "test:docker": "node test-docker.js",
+    "test:server": "node test-server.js",
+    "test:frontend": "electron test-frontend.js",
     "test:layout": "electron test-layout.js",
-    "test:ui": "electron test-backend-ui.js"
+    "test:ui": "electron test-backend-ui.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
   }
 }

@@ -103,7 +103,19 @@ def physics_check(profile, budget, window=FLOOR_WINDOW, kv_quant="q8_0"):
     quant or a smaller model, never "shrink the context".
     """
     needed = profile.footprint_bytes(window, kv_quant)
-    available = budget.usable_vram_bytes + (0 if budget.uma else budget.ram_available_bytes)
+    # The hard refusal is about *physical* memory, not the planning budget:
+    #  * UMA: the unified pool is total_device_bytes; usable is only the
+    #    zero-spill target, so a model between the two is spill-visible, not
+    #    impossible (B-15).
+    #  * discrete: spill lands in system RAM. Free RAM is used when a local
+    #    probe reported it; a client profile only reports total RAM, which is
+    #    still a hard ceiling.
+    if budget.uma:
+        available = budget.total_device_bytes
+    else:
+        available = budget.usable_vram_bytes + (
+            budget.ram_available_bytes or budget.ram_total_bytes
+        )
     if needed > available:
         raise PhysicsRefusal(
             needed,
@@ -123,16 +135,25 @@ def plan_window(profile, budget, kv_quant="q8_0", floor=FLOOR_WINDOW, target=TAR
 
     Ladder: floor -> x1.5 -> ... -> native cap. The floor is a guarantee; if
     even the floor does not fit resident, spill is reported instead of shrinking
-    below the floor.
+    below the floor. The native cap always wins: a model whose native window is
+    below the floor is planned at its native window, never beyond it.
     """
-    window = floor
+    # B-19: a non-positive floor made int(window * 1.5) a fixed point and the
+    # loop never terminated. Keep the floor positive and the step monotonic.
+    floor = max(1, int(floor))
     native = profile.native_window if hasattr(profile, "native_window") else None
     cap = native or target
-    best = floor
+    # B-08: the native window is a hard cap. When a model declares less than
+    # the floor, the floor yields to it instead of planning beyond training.
+    best = min(floor, cap)
+    window = best
     while window <= cap:
         if resident_bytes(profile, budget, window, kv_quant) <= budget.usable_vram_bytes:
             best = window
-            window = int(window * 1.5)
+            step = max(window + 1, int(window * 1.5))
+            if step > cap:
+                break
+            window = step
         else:
             break
     return best

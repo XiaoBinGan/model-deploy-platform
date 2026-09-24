@@ -439,3 +439,67 @@ grep -n "jump('" /Users/supre/Documents/tmp/model-deploy-platform/frontend/index
 3. \`refreshDeployments\` 重建 t-dep 前记住当前 value，重建后恢复；或只在列表变化时重建。
 4. 部署下拉的过滤条件加入后端兼容性（如 \`r.reason_key!=='backend-incompatible'\`）。
 5. \`createDeploy\` 期间禁用 \`#deploy-btn\`；后端 id 加自增序号。
+
+---
+
+## 七、前端修复与回归（本轮 · feat/client-hardware-profile）
+
+> 本节由前端修复子代理追加，只记录本轮改动与测试结果；上面的问题原文未改。
+
+### 7.1 Docker 部署表单（docs/docker-design.md §8）
+
+- `ALL_BACKENDS` 追加 `docker`；`fillBackends()` 对两个后端下拉同时生效，可用/可安装/装不了的标注沿用 `backendStatus()`。
+- 部署卡片新增 `#d-docker`，仅当 `#d-backend` 选中 `docker` 时显示：
+  - `#d-image`（默认 `vllm/vllm-openai:latest`）
+  - `#d-gpus`（`all / none / 0 / 0,1`，默认 `all`）
+  - `#d-volumes`（每行 `host:container[:ro]`）
+  - `#d-extra`（每行一个参数，避免带空格路径裂开）
+- `createDeploy()` 仅在 `backend === docker` 时写入 `image / gpus / volumes / extra_args`；其它后端不写。
+- 解析：volumes 按冒号拆，末段为 `ro` 则只读，host/container 必须绝对路径，空行跳过；extra_args 按行拆、去空行。相对路径、镜像名含空白、超过 8 个卷、超过 32 个参数、单项超过 200 字符都在提交前拦截并写 `#d-log`。
+- macOS 诚实提示：`CONFIG.local === true` 且 `CONFIG.caps.platform === darwin` 时在区块内显示 `gpuPath()` 文案（优先取 `unavailable/installable.vllm.gpu`，否则用等价固定文案）；`caps.docker === false` 时提示守护进程没起。
+- 不可用 docker 被选中仍按既有逻辑回退并弹安装框；回退是程序化改值不会再触发 onchange，因此显式调用 `updateDockerBlock()` 收起区块。
+
+### 7.2 F-xx 逐条
+
+| 编号 | 修复 |
+|---|---|
+| F-03 | `refresh()` 失败分支调用新的 `resetStatus()`：status-dot 回灰点、status-text 改「无法连接后端」，并清空 hw-device/hw-budget/hw-source/hw-total/hw-trust 与新增的 hw-type/hw-arch/hw-confidence。 |
+| F-04 | `healthCheck()` 加 try/catch 与 `r.ok` 检查，500/网络失败都在 `#t-out` 显示「健康检查失败」。 |
+| F-05 | `depStart()/depStop()` 加 try/catch 与 `r.ok` 检查，失败写 `#d-log`。 |
+| F-06 | `refreshDeployments()` 重建 `#t-dep` 前记住当前 value，重建后恢复；`onTestDepChange(keepModel)` 在选择未变时不再改写 `#t-model`。 |
+| F-07 | 部署下拉过滤条件加 `r.reason_key !== backend-incompatible`。 |
+| F-09 | ALL_BACKENDS 加 docker 后 fillBackends() 自动覆盖；标注继续按 ready / installable / unavailable(runtime) 区分。 |
+| F-10 | `#d-port` 加 `min=1024 max=65535 step=1`、`#t-max` 加 `min=1 max=1048576 step=1`；`createDeploy()/runTest()` 提交前用 `validPort`/`validMaxTokens` 拦截空值与 NaN。 |
+| F-11 | 18 个 label 全部补 `for`；`pf-presets` 的 label 改成 `<div class="flabel">`（它指向的是 div 不是控件）。现有 21 个 label 全部有 for 且指向存在的 id。 |
+| F-12 | 部署卡片头加「服务测试 →」入口，`jump('service')` 生效。 |
+| F-13 | `resolveProfile()` 末尾改 `await refresh()`。 |
+| S1 | 部署操作按钮改 `data-dep-action`/`data-dep-id` + `#d-list` 事件委托，id 不再裸拼进 inline onclick。 |
+
+顺带补完 F-01 的收尾：`usePick()` 原先仍 `JSON.parse(option.value)`，而 option 已改为索引，永远选不中；现改为查 `DEPLOY_MODELS`。
+
+### 7.3 误导性标签与 confidence（docs/probe-session-design.md §1/§6）
+
+- `hw-type` 改为「设备类型 · 容量」：UMA 显示「统一内存 · 24 GB」，独显显示「独立显存 · 12 GB」。容量优先 `total_device_gb`（物理容量），为 0/缺省时回退 `usable_vram_gb`。
+- 查表得来的值追加「（按型号查表） 不对？改」，链接跳 `jump('profile')`。判定：confidence 为 unverified/disputed，或没有 confidence 且 `hardware_trusted === false`。
+- CPU 架构单独一行（`hw-arch`），值为空或 unknown 时不渲染。
+- 新增 `hw-confidence`，按契约映射：verified→实测与查表一致；measured→实测值；disputed→与型号标称不符，请确认（warn 样式）；unverified→按型号查表，未实测；confirmed→已手动确认。字段缺失时不显示、不报错（依次读 `rec.confidence`、`normalized_profile.confidence`、`hardware.confidence`）。
+
+### 7.4 测试
+
+新增 `desktop/test-frontend.js`（真 Electron 加载 `frontend/index.html`，用 `window.fetch` 打桩）：**37 passed / 0 failed**。
+
+- docker 区块默认隐藏 / 选 docker 显示 / 选回 ollama 隐藏；不可用 docker 回退后区块收起且弹框打开；macOS 提示存在、非 macOS 不显示。
+- `createDeploy()` 在 docker 下请求体的 image/gpus/volumes/extra_args 正确（含带空格路径、ro、空行）；非 docker 后端不带这些字段。
+- `parseVolumes`/`parseExtraArgs` 单元断言。
+- F-06 轮询保持 t-dep 选择与 t-model；F-07 不兼容模型不出现；F-10 端口 0/非数字与非法 Token 提交前被拦。
+- F-03/F-04/F-05 行为与「无 unhandled rejection」；confidence 的 unverified/disputed/缺失，以及 architecture=unknown 不渲染；S1 data 属性。
+
+回归：
+
+- `desktop/test-backend-ui.js` 控制面模式 **10 passed / 0 failed**；桌面端模式 **21 passed / 0 failed**（下拉总数 6→7，测试断言已同步）。
+- 两个 Electron 测试都加了 `disable-http-cache` + 清缓存 + URL cache-bust，避免读到上一次的旧 index.html。
+
+### 7.5 未做
+
+- 未改 `desktop/deploy.js` / `installers.js` / `backend/**`（不在所有权内）：因此当前桌面端 `/api/backends` 还不含 docker，真实桌面里选 docker 会走「本机装不了」弹框；前端按冻结契约已就绪，等桌面端落地后 docker 进入 backends 即显示表单。
+- F-08（后端 id）属后端所有权，未动。

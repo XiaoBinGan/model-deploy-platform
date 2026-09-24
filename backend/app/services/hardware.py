@@ -15,6 +15,8 @@ from dataclasses import dataclass, asdict
 import platform
 import subprocess
 
+from . import gpu_table
+
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 
@@ -33,6 +35,10 @@ class HardwareBudget:
     uma: bool
     source: str
     device_name: str = ""
+    # Total system RAM. Not a planning input: it is the physical ceiling a
+    # spilling model can reach when free memory is unknown (a client profile),
+    # so physics_check can tell "does not fit VRAM" from "does not fit at all".
+    ram_total_bytes: int = 0
 
     @property
     def usable_vram_gb(self):
@@ -46,12 +52,17 @@ class HardwareBudget:
     def ram_available_gb(self):
         return round(self.ram_available_bytes / GIB, 2)
 
+    @property
+    def ram_total_gb(self):
+        return round(self.ram_total_bytes / GIB, 2)
+
     def to_dict(self):
         d = asdict(self)
         d.update({
             "usable_vram_gb": self.usable_vram_gb,
             "total_device_gb": self.total_device_gb,
             "ram_available_gb": self.ram_available_gb,
+            "ram_total_gb": self.ram_total_gb,
         })
         return d
 
@@ -195,6 +206,66 @@ def _clean_text(value, limit=200):
     return str(value)[:limit]
 
 
+# windows-gaps.md D: one enum, one normalization point. The probe used to emit
+# "windows" while the UI spoke "win32", so a Windows profile silently failed to
+# match every platform check.
+PLATFORM_VALUES = ("darwin", "win32", "linux", "unknown")
+
+
+def normalize_platform(value):
+    """Normalize any platform spelling to darwin / win32 / linux / unknown."""
+    name = _clean_text(value, 32).strip().lower()
+    if name in {"darwin", "macos", "mac", "macosx", "osx", "mac os x"}:
+        return "darwin"
+    if name in {"win32", "windows", "win"}:
+        return "win32"
+    if name in {"linux", "gnu/linux"}:
+        return "linux"
+    return "unknown"
+
+
+def _table_vram(name):
+    """VRAM the GPU lookup table claims for a name, or None on a miss."""
+    if not name:
+        return None
+    try:
+        return gpu_table.lookup(name).get("vram_gb")
+    except Exception:
+        return None
+
+
+# Cross-validation verdicts (docs/probe-session-design.md section 6). Frozen
+# contract: the frontend keys its labels off these exact strings.
+CONFIDENCE_VALUES = ("verified", "measured", "disputed", "unverified", "confirmed")
+# "measured matches the table" is +/- 0.5 GB; anything wider is a disagreement.
+CONFIDENCE_TOLERANCE_GB = 0.5
+
+
+def _cross_validate(profile, measured, warnings):
+    """Compare measured VRAM against the lookup table.
+
+    measured is [(name, vram_gb)] for values the profile actually claimed. A
+    browser cannot read VRAM, so its values are table values, not measurements.
+    """
+    if profile.get("confirmed"):
+        return "confirmed"
+    source = _clean_text(profile.get("source"), 24).strip().lower()
+    if source.startswith("browser") or not measured:
+        return "unverified"
+    compared = 0
+    for name, value in measured:
+        table = _table_vram(name)
+        if table is None:
+            continue
+        compared += 1
+        if abs(value - table) > CONFIDENCE_TOLERANCE_GB:
+            warnings.append(
+                "显存与型号标称不符（实测 %.1f GB / 查表 %.1f GB），请确认" % (value, table)
+            )
+            return "disputed"
+    return "verified" if compared else "measured"
+
+
 @dataclass
 class ProfileResult:
     budget: HardwareBudget
@@ -202,6 +273,7 @@ class ProfileResult:
     normalized: dict
     source: str
     trusted: bool
+    confidence: str = "unverified"
 
     def to_dict(self):
         return {
@@ -210,6 +282,7 @@ class ProfileResult:
             "normalized": self.normalized,
             "source": self.source,
             "trusted": self.trusted,
+            "confidence": self.confidence,
         }
 
 
@@ -224,21 +297,42 @@ def budget_from_profile(profile, planning=True):
     warnings = []
     source = "client:" + (_clean_text(profile.get("source"), 24) or "manual")
 
-    platform_name = _clean_text(profile.get("platform"), 32) or "unknown"
+    platform_name = normalize_platform(profile.get("platform"))
     architecture = _clean_text(profile.get("architecture"), 32) or "unknown"
     cpu_cores = _clamp(profile.get("cpu_cores"), CORES_MIN, CORES_MAX)
     ram_gb = _clamp(profile.get("ram_gb"), RAM_MIN_GB, RAM_MAX_GB)
 
+    # B-06: gpus is untrusted. int/bool/float used to reach slicing and raise
+    # TypeError -> 500; anything that is not a list is treated as no GPUs.
+    raw_gpus = profile.get("gpus")
+    if not isinstance(raw_gpus, list):
+        raw_gpus = []
+
     gpus = []
-    for raw in (profile.get("gpus") or [])[:MAX_GPUS]:
+    measured = []
+    for raw in raw_gpus[:MAX_GPUS]:
         if not isinstance(raw, dict):
             continue
+        name = _clean_text(raw.get("name"), 200)
+        submitted = _clamp(raw.get("vram_gb"), VRAM_MIN_GB, VRAM_MAX_GB)
+        uma_flag = bool(raw.get("uma"))
+        vram = submitted
+        if vram is None and not uma_flag:
+            # The browser often knows only the adapter name. Fall back to the
+            # table so a name-only profile is not priced at zero.
+            table = _table_vram(name)
+            if table is not None:
+                vram = _clamp(table, VRAM_MIN_GB, VRAM_MAX_GB)
         gpus.append({
-            "name": _clean_text(raw.get("name"), 200),
+            "name": name,
             "vendor": _clean_text(raw.get("vendor"), 32) or "unknown",
-            "vram_gb": _clamp(raw.get("vram_gb"), VRAM_MIN_GB, VRAM_MAX_GB),
-            "uma": bool(raw.get("uma")),
+            "vram_gb": vram,
+            "uma": uma_flag,
         })
+        if submitted is not None:
+            measured.append((name, submitted))
+
+    confidence = _cross_validate(profile, measured, warnings)
 
     discrete = [g for g in gpus if g["vram_gb"] and not g["uma"]]
     uma_gpu = [g for g in gpus if g["uma"]]
@@ -269,8 +363,11 @@ def budget_from_profile(profile, planning=True):
         usable_vram_bytes=int(usable * GIB),
         total_device_bytes=int(total * GIB),
         # Free memory on a remote machine is unknowable; only a local agent can
-        # provide it, and live fit checks must run there.
+        # provide it, and live fit checks must run there. Total RAM is still a
+        # hard physical ceiling, so physics_check can use it to keep spilling
+        # models visible instead of calling them impossible (B-15).
         ram_available_bytes=0,
+        ram_total_bytes=int((ram_gb or 0.0) * GIB),
         uma=uma,
         source=source,
         device_name=device_name or "Unknown GPU",
@@ -284,4 +381,4 @@ def budget_from_profile(profile, planning=True):
         "gpus": gpus,
         "uma": uma,
     }
-    return ProfileResult(budget, warnings, normalized, source, False)
+    return ProfileResult(budget, warnings, normalized, source, False, confidence)

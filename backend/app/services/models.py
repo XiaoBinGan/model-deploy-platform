@@ -8,10 +8,12 @@ This module is only the HTTP shape plus local-checkpoint bookkeeping.
 import json
 import subprocess
 from pathlib import Path
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .hardware import probe_budget, budget_from_profile, GIB
+from .hardware import (
+    probe_budget, budget_from_profile, GIB, _clamp, VRAM_MIN_GB, VRAM_MAX_GB,
+)
 from . import catalog as catalog_service
 from .catalog import REASON_KEYS, CATALOG
 from .estimator import COMFORT_DECODE_TOK_S
@@ -24,6 +26,8 @@ class RecommendRequest(BaseModel):
     task: str = "chat"
     goal: str = "balanced"  # balanced, quality, low-memory, throughput, low-latency
     concurrency: int = 4
+    # NaN / Infinity / 1e400 are rejected by recommend() below with a clean
+    # 422, instead of reaching int(inf * GIB) and raising -> 500 (B-05).
     available_vram_gb: float | None = None
     backend: str = "ollama"
     prefer_quantized: bool | None = None
@@ -131,9 +135,15 @@ def recommend(req: RecommendRequest):
         budget = profile_result.budget
     else:
         budget = probe_budget(planning=not req.live)
-    if req.available_vram_gb:
-        budget.usable_vram_bytes = int(req.available_vram_gb * GIB)
-    if req.available_vram_gb and not budget.uma:
+    if req.available_vram_gb is not None:
+        # B-05/B-07: a caller-supplied budget is clamped to the same range as
+        # every other hardware field. Non-finite input is a 422, not a 500.
+        vram_gb = _clamp(req.available_vram_gb, VRAM_MIN_GB, VRAM_MAX_GB)
+        if vram_gb is None:
+            raise HTTPException(status_code=422, detail="available_vram_gb 必须是有限数值")
+        budget.usable_vram_bytes = int(vram_gb * GIB)
+        # The physical total can never be smaller than the budget we price
+        # against, on UMA or discrete alike.
         budget.total_device_bytes = max(budget.total_device_bytes, budget.usable_vram_bytes)
 
     hardware_warnings = list(profile_result.warnings) if profile_result else []
@@ -182,6 +192,9 @@ def recommend(req: RecommendRequest):
         "client_is_local": req.client_is_local,
         "hardware_source": budget.source,
         "hardware_trusted": profile_result.trusted if profile_result else True,
+        # Cross-validation verdict (docs/probe-session-design.md section 6).
+        # The frontend reads this exact key and enum.
+        "confidence": profile_result.confidence if profile_result else "measured",
         "hardware_warnings": hardware_warnings,
         "normalized_profile": profile_result.normalized if profile_result else None,
         "comfort_decode_tok_s": COMFORT_DECODE_TOK_S,

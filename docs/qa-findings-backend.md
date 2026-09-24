@@ -708,3 +708,69 @@ grep -rn "models.yaml\|compatibility.yaml" \
 
 统计：**24 条** = 严重 4 + 一般 12 + 轻微 6 + 存疑 2。
 其中「确认的 bug」22 条（含通过接口或单元复现），「代码审查怀疑」2 条（B-22、B-23）。
+
+---
+
+## 六、修复记录（本轮）
+
+本节由协调者维护。上面第一~五节是**修复前**的原始发现，保留不改，便于对照。
+下表记录每条发现的最终状态；「提交」列写明是已进入 HEAD，还是在本轮工作区改动里。
+
+### 6.1 状态表
+
+| 编号 | 状态 | 修法 | 提交 |
+|---|---|---|---|
+| B-01 | ✅ 已修 | 默认**不注册** CORS 中间件（同源 UI 不需要）；需要跨源时用 `MDP_CORS_ORIGINS` 显式列白名单，不再 `allow_origins=["*"]` | HEAD `95cabd0` |
+| B-02 | ✅ 已修 | 部署 id 改 `"dep_" + uuid.uuid4().hex[:12]`，不再用秒级时间戳 | HEAD `95cabd0` |
+| B-03 | ✅ 已修 | `command_string` 改 `shlex.join(cmd)`（原 `" ".join`），`model_path` 不能再注入命令 | HEAD `95cabd0` |
+| B-04 | ✅ 已修 | 5 个改状态的端点全部 `_require_local`：POST 创建 / start / stop / test、DELETE。见 6.2 的残留说明 | HEAD `95cabd0` |
+| B-05 | ✅ 已修 | `available_vram_gb` 非有限值（NaN/Infinity/1e400）→ 422 而不是 500 | 本轮 |
+| B-06 | ✅ 已修 | `gpus` 先 `isinstance(list)`，int/float/bool/dict/str 都按 `[]` 处理，不再 500 | 本轮 |
+| B-07 | ✅ 已修 | `available_vram_gb` 钳制到 `[0.5, 4096]`，并统一 `total_device_bytes = max(total, usable)` | 本轮 |
+| B-08 | ✅ 已修 | `plan_window` 用 `best = min(floor, cap)` 让 `native_ctx` 夹住窗口。`qwen3-8b` 的 `--max-model-len` 由 65536 → 32768 | 本轮 |
+| B-09 | ✅ 已修 | 新增 `DeploymentNotFound(ValueError)`，6 个入口（GET one / health / start / stop / test / delete）统一 404 | 本轮 |
+| B-10 | ✅ 已修 | `create()` 入口校验端口 1024~65535（在 ollama 改写端口之前），非法 → 400 | 本轮 |
+| B-11 | ✅ 已修 | GPU 表补 Apple M5 / M5 Pro / M5 Max；`apple gpu` 死键修好；`RTX 40900` 不再误匹配 | HEAD `7114b5d` |
+| B-12 | ✅ 已修 | `_public_host` 加白名单：Host 头只在**属于本机**（loopback 或 `_local_addresses()`）时才回显，否则替换为本机地址。实测 `evil.attacker.com` / `169.254.169.254` 都被替换 | HEAD `95cabd0` |
+| B-13 | ✅ 已修 | `health()` 在 `status != RUNNING` 时直接 `healthy: false`，不再借别的服务的 200 | 本轮 |
+| B-14 | ✅ 已修（文档） | `profiles.py` docstring/注释明确写「是 checksum 不是 signature，无密钥、可重算、只防手误不防篡改」。**代码行为未变**——这本来就是设计取舍 | 本轮 |
+| B-15 | ✅ 已修（确认为真 bug） | 原判「存疑」，实测确认不可达：UMA / 客户端 `ram_available=0` 时 `spill-visible` 数学上不可达。`physics_check` 硬拒绝改用**物理上限**（UMA→`total_device_bytes`；独显→`usable + (ram_available or ram_total)`）；`zero_spill` 不变量保持与 `usable` 比 | 本轮 |
+| B-16 | ✅ 已修 | 全局异常处理器：`DeploymentNotFound`→404、`InvalidDeploymentRequest`→400、`ValueError`→400、`Exception`→500 JSON。500 的 body 故意是固定文案，异常字符串留在服务端日志 | 本轮 |
+| B-17 | ✅ 已修 | `_host_from_header` 先剥 `[::1]` 方括号再剥端口；`_url_host` 给 IPv6 加回方括号 | 本轮 |
+| B-18 | ✅ 已修 | `deployments.py` 顶层 `import importlib.util` | 本轮 |
+| B-19 | ✅ 已修 | `floor = max(1, int(floor))` + 步进 `max(window+1, int(window*1.5))`，`floor` 为 -1/0/1 不再死循环 | 本轮 |
+| B-20 | ✅ 已修 | 选「真的实现 SSE」而不是拒绝 `stream=true`（拒绝会打断所有默认发流式的 OpenAI SDK）。新增 `sse_chunks()`，末尾 `data: [DONE]`。**注意：仍是单 delta，不是逐 token 增量**——`generate` 本身不是增量的 | 本轮 |
+| B-21 | ✅ 已修 | `_entry` 把 `<base>-<quant>` 变体 id 反解回 catalog entry；默认 `qwen3-8b-bf16` 现在走 catalog（`variant=bf16`），不再走 fallback | 本轮 |
+| B-22 | ✅ 已修 | transformers 启动改 reader 线程 + queue + `time.monotonic()` 总超时，失败/超时走 `_reap()` kill+wait，不再阻塞在 `readline()`、不留孤儿进程 | 本轮 |
+| B-23 | ✅ 已修 | `nvidia_devices()` 逐行 try/except，坏行跳过；`/api/environment/scan` 不再 500 | 本轮 |
+| B-24 | ✅ 已修 | 确认无代码引用后删除 `catalog/models.yaml` 与 `catalog/compatibility.yaml`，并加测试断言其不存在（防止被当成可配置重新加回来）。**另**：根 `README.md` 的目录树也引用了这两个文件，已一并删掉 | 本轮 |
+
+**统计：24/24 已处理。** 其中 B-14 是文档澄清（代码行为本来正确），B-15 由「存疑」升级为「确认为真 bug 并修复」。
+
+### 6.2 残留与有意保留
+
+**B-04 的 GET 端点有意不加远端限制。** `GET /api/deployments`（列表）与
+`GET /api/deployments/{id}/health` 仍允许远端调用，这是**有意的**，不是漏修：
+
+- 它们不改变服务端状态（`health` 只发一次本地只读 HTTP 探测）。
+- 局域网用户要能在浏览器里打开控制面看部署列表——这正是「局域网可访问」这个需求的用途。
+  如果给 `list` 加 403，LAN 上的控制面 UI 会直接空掉。
+- B-12 修好之后，`health` 探测的目标 URL 已被白名单限制在**本机地址**，
+  远端无法借它去打内网其他主机（实测 `evil.attacker.com`、`169.254.169.254` 都被替换掉）。
+
+真正的风险（`start` 会把模型读进内存、`test` 会真实推理、`stop` 会卸载别人的模型）
+已经全部被 `_require_local` 挡住。
+
+### 6.3 本轮验证方式
+
+协调者独立复验（不是只看子代理报告）：
+
+```bash
+cd backend && .venv/bin/python -m pytest -q -m "not network"
+# -> 196 passed, 1 deselected
+```
+
+另外用真实 HTTP / TestClient 复验了：B-08 的窗口（`--max-model-len` 65536→32768）、
+B-09 的 404、B-10 的端口校验、B-12 的 Host 白名单、B-15 的 `spill-visible` 可达性、
+confidence 五值判定、以及 docker 规划的 argv 形状。
+
