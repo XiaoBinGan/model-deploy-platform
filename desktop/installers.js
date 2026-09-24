@@ -33,8 +33,47 @@ function manual(steps) {
 // Two different kinds of "no", which the UI must not conflate:
 //   "platform" - this machine cannot have it, whatever you install
 //   "runtime"  - it may well be installed; the desktop app just cannot run it
-function cannot(reason, hint, kind) {
-  return { ok: false, reason, manual: hint || "", kind: kind || "platform" };
+function cannot(reason, hint, kind, gpu) {
+  return { ok: false, reason, manual: hint || "", kind: kind || "platform", gpu: gpu || "" };
+}
+
+// Whether a GPU-only backend could run on this machine at all, and by which
+// route. Pure: it takes what the caller probed and returns what to say, so the
+// wording is testable without a GPU - which matters, because this branch exists
+// precisely because untested platform assumptions kept being wrong.
+//
+//   caps = { platform, docker, nvidia }
+function gpuPath(caps) {
+  const platform = (caps && caps.platform) || process.platform;
+  const docker = !!(caps && caps.docker);
+  const nvidia = !!(caps && caps.nvidia);
+
+  if (platform === "darwin") {
+    // Docker looks like it should rescue this, and users will ask, so answer it.
+    return "macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 " +
+      "WSL2 后端提供），容器这条路在 Mac 上不通。";
+  }
+  if (platform === "win32") {
+    if (nvidia && docker) {
+      return "这台机器有 NVIDIA 显卡，Docker 也在运行：vLLM 可以通过 WSL2 + Docker 跑起来。" +
+        "本 app 还没有这条部署路径，需要在 WSL2 里手动 docker run。";
+    }
+    if (nvidia) {
+      return "检测到 NVIDIA 显卡，但没有可用的 Docker。装 Docker Desktop（WSL2 后端）之后" +
+        "可以走容器这条路。";
+    }
+    return "没有检测到 NVIDIA 显卡，容器里也没有 GPU 可直通，这条路不通。";
+  }
+  // linux
+  if (nvidia && docker) {
+    return "这台机器有 NVIDIA 显卡，Docker 也在运行：docker run --gpus all " +
+      "vllm/vllm-openai 是更常见的做法（需要 nvidia-container-toolkit）。";
+  }
+  if (nvidia) {
+    return "检测到 NVIDIA 显卡。除了上面的 pip 安装，也可以用官方镜像" +
+      "（需要 nvidia-container-toolkit）。";
+  }
+  return "没有检测到 NVIDIA/AMD 显卡：vLLM 有 CPU 后端，但速度远达不到可用水平。";
 }
 
 async function installPlan(name, ctx) {
@@ -105,36 +144,33 @@ async function installPlan(name, ctx) {
   }
 
   if (name === "vllm" || name === "sglang") {
+    const gpu = gpuPath(ctx.caps || { platform });
     if (platform === "linux") {
       const pkg = name === "vllm" ? "vllm" : "sglang[all]";
       const steps = [{
-        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）。" +
-          "官方镜像 vllm/vllm-openai + nvidia-container-toolkit 是更常见的做法，" +
-          "但那条路要把模型目录挂进容器，这里装原生包更直接",
+        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）",
         argv: ["python3", "-m", "pip", "install", pkg],
       }];
-      return { ok: true, backend: name, steps, manual: manual(steps) };
+      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
     }
     if (platform === "darwin") {
-      // Docker does not rescue this one, and users will ask, so say why rather
-      // than leaving "no wheel" as the whole story.
       return cannot(
         name + " 官方只发 manylinux 的 x86_64 / aarch64 wheel，没有 macOS 版本。" +
-        "Docker 也不行：Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供，" +
-        "macOS 上容器拿不到 GPU，纯 CPU 跑远远达不到可用速度。" +
         "Mac 上对应的东西是 MLX。",
-        "https://docs.vllm.ai/en/latest/deployment/docker.html"
+        "https://docs.vllm.ai/en/latest/deployment/docker.html",
+        "platform",
+        gpu
       );
     }
     return cannot(
-      name + " 不能在原生 Windows 上跑。可行的路径是 WSL2 + NVIDIA 驱动 + Docker" +
-      "（WSL2 本身没有版本限制，家庭版也能装），但整个过程要在 WSL2 里做。" +
-      "机器上没有 NVIDIA 显卡的话，这条路径也不通。",
-      "https://docs.vllm.ai/en/latest/deployment/docker.html"
+      name + " 不能在原生 Windows 上跑。",
+      "https://docs.vllm.ai/en/latest/deployment/docker.html",
+      "platform",
+      gpu
     );
   }
 
   return cannot("桌面端不认识这个后端。");
 }
 
-module.exports = { installPlan, BACKEND_INFO, MLX_VENV };
+module.exports = { installPlan, gpuPath, BACKEND_INFO, MLX_VENV };

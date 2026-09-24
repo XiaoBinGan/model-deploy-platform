@@ -141,6 +141,15 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript("closeModal()");
   }
 
+  // The GPU/Docker assessment has to actually reach the dialog, otherwise the
+  // probe is dead code.
+  if (base.local && base.needs.indexOf("vllm") >= 0) {
+    const r = await win.webContents.executeJavaScript(PICK("vllm"));
+    check("vllm 弹框里回答了 Docker 行不行", r.body.indexOf("Docker") >= 0, r.body.slice(0, 100));
+    check("没有「确认安装」按钮", r.installBtn === false);
+    await win.webContents.executeJavaScript("closeModal()");
+  }
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   app.exit(fail ? 1 : 0);
 }).catch((e) => { console.error("FAILED:", e.message); app.exit(1); });

@@ -147,34 +147,85 @@ class Deployments {
     // installed here and what that would run. Greying an entry out and stopping
     // there leaves the user with no way forward; this is what the UI needs to
     // offer one.
+    const ctx = await this._installCtx();
     const installable = {};
     const unavailable = {};
     for (const name of ALL_BACKENDS) {
       if (backends.indexOf(name) >= 0) continue;
-      const plan = await installPlan(name, this._installCtx());
+      const plan = await installPlan(name, ctx);
       const info = BACKEND_INFO[name] || "";
       if (plan.ok) {
         installable[name] = {
           info,
           steps: plan.steps.map((s) => s.note),
           manual: plan.manual,
+          gpu: plan.gpu || "",
         };
       } else {
-        unavailable[name] = { info, reason: plan.reason, manual: plan.manual, kind: plan.kind };
+        unavailable[name] = {
+          info,
+          reason: plan.reason,
+          manual: plan.manual,
+          kind: plan.kind,
+          gpu: plan.gpu || "",
+        };
       }
     }
 
     // allow_remote_deploy is always true here: in the desktop app every
     // deployment is local by definition.
-    return { backends, installed, installable, unavailable, allow_remote_deploy: true, local: true };
+    return {
+      backends,
+      installed,
+      installable,
+      unavailable,
+      caps: ctx.caps,
+      allow_remote_deploy: true,
+      local: true,
+    };
   }
 
-  _installCtx() {
+  // Whether a GPU-only backend could run here at all, and by which route.
+  // Probed rather than assumed - the whole reason this branch exists is that
+  // assumed platform facts kept turning out wrong.
+  async _caps() {
+    if (this._capsCache && Date.now() - this._capsAt < 30000) return this._capsCache;
+    const docker = (await hasBinary("docker")) && (await this._dockerAlive());
+    const nvidia = await hasBinary("nvidia-smi");
+    this._capsCache = { platform: process.platform, docker, nvidia };
+    this._capsAt = Date.now();
+    return this._capsCache;
+  }
+
+  // `docker` on PATH does not mean the daemon is up, and a stopped Docker
+  // Desktop is the common case on a desktop machine.
+  _dockerAlive() {
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = execFile(
+          "docker",
+          ["info", "--format", "{{.ServerVersion}}"],
+          { timeout: 6000 },
+          (err, stdout) => resolve(!err && String(stdout || "").trim().length > 0)
+        );
+      } catch (e) {
+        // execFile validates its arguments synchronously; a throw here must not
+        // take the whole capability probe down with it.
+        resolve(false);
+        return;
+      }
+      if (child && child.on) child.on("error", () => resolve(false));
+    });
+  }
+
+  async _installCtx() {
     return {
       platform: process.platform,
       arch: process.arch,
       home: os.homedir(),
       has: hasBinary,
+      caps: await this._caps(),
     };
   }
 
@@ -195,9 +246,9 @@ class Deployments {
       return res.end();
     }
 
-    const plan = await installPlan(name, this._installCtx());
+    const plan = await installPlan(name, await this._installCtx());
     if (!plan.ok) {
-      emit({ type: "error", reason: plan.reason, manual: plan.manual });
+      emit({ type: "error", reason: plan.reason, manual: plan.manual, gpu: plan.gpu || "" });
       return res.end();
     }
 

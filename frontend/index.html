@@ -547,6 +547,7 @@ function openInstallModal(b){
     html+=(d.steps||[]).map(function(s,i){
       return '<div class="stepline"><span class="n">'+(i+1)+'</span><span>'+esc(s)+'</span></div>';
     }).join('');
+    if(d.gpu){html+='<div class="mline"><span class="k">GPU</span>'+esc(d.gpu)+'</div>';}
     html+='<div class="mline" style="margin-top:12px"><span class="k">等价命令</span></div>';
     html+='<pre>'+esc(d.manual||'')+'</pre>';
     body.innerHTML=html;
@@ -570,6 +571,7 @@ function openInstallModal(b){
     html+='<div class="mline muted">不是没装的问题——装什么都解决不了，换台机器（控制面所在的那台）才行。</div>';
   }
   html+='<div class="mline">'+esc(reason)+'</div>';
+  if(st.data&&st.data.gpu){html+='<div class="mline"><span class="k">GPU</span>'+esc(st.data.gpu)+'</div>';}
   if(ref){html+='<div class="mline" style="margin-top:12px"><span class="k">参考</span></div><pre>'+esc(ref)+'</pre>';}
   body.innerHTML=html;
 }
@@ -590,6 +592,7 @@ function runInstall(b){
     else if(m.type==='output'){append('    '+m.line);}
     else if(m.type==='error'){
       append('');append('装不了：'+m.reason);
+      if(m.gpu){append(m.gpu);}
       if(m.manual){append('参考：'+m.manual);}
       finish('<button class="mini" id="m-close2">关闭</button>');
       document.getElementById('m-close2').onclick=closeModal;

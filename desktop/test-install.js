@@ -62,6 +62,29 @@ const allTools = () => Promise.resolve(true);
   check("vllm 标为 platform（平台就没有）", vm.kind === "platform", "kind=" + vm.kind);
   check("两者都是 ok:false 但类别不同", !tf.ok && !vm.ok && tf.kind !== vm.kind);
 
+  // --- the GPU / Docker assessment is pure, so it is testable without a GPU ---
+  const { gpuPath } = require("./installers");
+
+  check("macOS：明确回答 Docker 也不行",
+    gpuPath({ platform: "darwin", docker: true, nvidia: false }).indexOf("Docker 也拿不到 GPU") >= 0);
+  check("Windows：有显卡 + Docker 时给出可行路径",
+    gpuPath({ platform: "win32", docker: true, nvidia: true }).indexOf("WSL2 + Docker") >= 0);
+  check("Windows：有显卡但没 Docker 时说去装 Docker",
+    gpuPath({ platform: "win32", docker: false, nvidia: true }).indexOf("装 Docker Desktop") >= 0);
+  check("Windows：没显卡时说这条路不通",
+    gpuPath({ platform: "win32", docker: true, nvidia: false }).indexOf("这条路不通") >= 0);
+  check("Linux：有显卡 + Docker 时提到官方镜像",
+    gpuPath({ platform: "linux", docker: true, nvidia: true }).indexOf("vllm/vllm-openai") >= 0);
+  check("Linux：没显卡时警告 CPU 达不到可用速度",
+    gpuPath({ platform: "linux", docker: false, nvidia: false }).indexOf("CPU") >= 0);
+  check("四种平台都给出非空判断",
+    ["darwin", "win32", "linux"].every((p) =>
+      [true, false].every((d2) => [true, false].every((n) => gpuPath({ platform: p, docker: d2, nvidia: n }).length > 0))));
+  check("缺少 caps 时不崩", typeof gpuPath({}) === "string" && gpuPath({}).length > 0);
+
+  const vmCaps = await installPlan("vllm", { ...mac, caps: { platform: "darwin", docker: false, nvidia: false } });
+  check("vllm 的理由里带上了 GPU/Docker 判断", vmCaps.gpu.indexOf("Docker") >= 0, vmCaps.gpu.slice(0, 36));
+
   const macVllm = await installPlan("vllm", mac);
   check("装不了时给出的是原因，不是命令",
     !macVllm.ok && macVllm.reason.indexOf("macOS") >= 0, macVllm.reason.slice(0, 60));
@@ -75,6 +98,21 @@ const allTools = () => Promise.resolve(true);
   // --- the step runner ------------------------------------------------------
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-install-"));
   const d = new Deployments(path.join(dir, "data"), "");
+
+  // --- the probe itself ---
+  const caps = await d._caps();
+  check("_caps 返回 platform/docker/nvidia",
+    typeof caps.platform === "string" && typeof caps.docker === "boolean" && typeof caps.nvidia === "boolean",
+    JSON.stringify(caps));
+  // _caps short-circuits on hasBinary("docker"), so on a machine without
+  // Docker this never runs - which is exactly how a malformed argv in it went
+  // unnoticed. Call it directly so the argv is exercised everywhere.
+  const alive = await d._dockerAlive();
+  check("_dockerAlive 返回布尔，参数不合法也不抛", typeof alive === "boolean", "got " + alive);
+  const probed = await d.detectBackends();
+  check("detectBackends 带上 caps", !!probed.caps, JSON.stringify(probed.caps));
+  check("每个装不了的后端都带 GPU 判断或为空",
+    Object.values(probed.unavailable || {}).every((v) => typeof v.gpu === "string"));
 
   const seen = [];
   const okCode = await d._runInstallStep(
