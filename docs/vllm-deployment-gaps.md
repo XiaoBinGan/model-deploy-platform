@@ -217,3 +217,39 @@ vLLM 跑不了是 Mac 的硬约束，不是 app 的问题。
 `create()` 校验 image/gpus/volumes/extra_args、`_runDocker()` 启动容器并在
 启动/停止/删除三处 `docker rm -f` 兜底，测试见 `desktop/test-docker.js`。
 
+---
+
+## 七、第四轮续：gap 6 / gap 7 已修
+
+第 177 行「未修：5（错误引导）、6（planner 平台判定）、7（创建时校验）」现在**全部关闭**。
+
+### gap 6：planner 对非 Linux 平台仍生成 CUDA 专用命令 —— 已修
+
+`environment.py` 抽出 `is_apple_silicon(system, architecture)` 与 `nvidia_devices()`，
+`planner._cuda_platform()` 复用它们（不再各写一套探测）。
+
+- 平台优先取**客户端档案**（`req.hardware.platform/architecture/gpus`），
+  只有没有档案时才探测控制面本机。
+- 非 NVIDIA 目标上，vllm 的 `--gpu-memory-utilization` 与 sglang 的
+  `--mem-fraction-static` 都省略，并在 `warnings` 里写明原因。
+- 文案基于**判定依据**而不是「本机」：档案无 NVIDIA→「目标机器未检测到 NVIDIA 显卡」；
+  `platform=darwin`→「目标平台是 Apple Silicon/macOS」；无档案本机探测→才说「控制面本机」。
+
+修之前有个实际的错误输出：`platform=win32` + `gpus=[]` 的档案会看到
+「本机是 Apple Silicon」——那是**控制面所在机器**的平台，被当成了客户端平台，
+Windows 用户会看到控制面告诉他「本机是 Apple Silicon」。
+
+### gap 7：创建时不校验后端可用性 —— 已修
+
+`deployments.KNOWN_BACKENDS` 与前端 / 桌面端的 `ALL_BACKENDS` 对齐，
+`create()` 分两种情况：
+
+| 情况 | 行为 |
+|---|---|
+| 未知后端名（如 `nonsense`） | `InvalidDeploymentRequest` → 400 |
+| 已知但本机探测不到（如这台 Mac 上的 vllm） | 仍创建，但 `status=BLOCKED`，日志写明「在本机不可用」 |
+
+即：**不假装能用，也不假装没这个后端**。`_detect_backends()` 同时补齐了
+mlx / llama.cpp / docker 的探测。
+
+

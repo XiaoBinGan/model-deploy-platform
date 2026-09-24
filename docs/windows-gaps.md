@@ -227,8 +227,35 @@ WSL 内部路径为静态审查。
 M5 实测输出 `usable=19.2GB (self ram=24GB, capacity=24GB)`；4GB 独显机器
 capacity=4、usable≈2，也能通过。
 
-## 未做
+## D 节（platform 枚举归一化）—— 已修
 
-- D 节（platform 枚举归一化）、E 节（electron-builder / 打包 / 签名）不在本轮
-  文件所有权内，未动。
+`backend/app/services/hardware.py` 新增 `normalize_platform()` 作为**唯一入口**，
+枚举收敛为 `darwin / win32 / linux / unknown`。实测：
+
+| 输入 | 输出 |
+|---|---|
+| `windows` / `win32` / `Windows` | `win32` |
+| `macos` / `darwin` / `Mac OS X` | `darwin` |
+| `linux` / `Linux` | `linux` |
+| `freebsd` / `""` / `None` | `unknown` |
+
+这样探测脚本、客户端档案、控制面三处的平台字符串不会再各自为政。
+
+## E 节（electron-builder / 打包）—— 配置完成，未在 Windows 构建
+
+`desktop/electron-builder.yml`：
+
+- mac：dmg，arm64 + x64；win：nsis，x64；linux：AppImage
+- `files` 白名单（main/server/deploy/installers/probe/preload*/package.json）
+- `extraResources`：`../frontend` → `frontend`
+  （`server.js` 用 `path.join(__dirname, "..", "frontend", "index.html")` 定位）
+
+图标 `desktop/build/icon.icns|ico|png` 程序化生成（Node zlib/CRC32 写 PNG + `sips`/`iconutil`），
+不依赖外部素材。`npx electron-builder --dir --mac` 实测 exit 0，产出 `ModelForge.app`，
+未签名（自动跳过）。
+
+**未验证**：没有在 Windows 上构建或运行过 nsis 安装包；mac 产物未做公证（notarization）。
+
+## 仍然未做的
+
 - B/C 节未在 Windows / WSL 真机执行；所有 Windows 结论仍是静态审查 + 纯函数单测。

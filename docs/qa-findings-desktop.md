@@ -568,3 +568,51 @@ test-server.js 里有 6 条静态断言守住。deploy.js 的整文件覆盖写�
 缺失部署 404、方法不匹配 405、代理超时 504、请求/响应头透传、路径穿越 404、
 main.js 安全静态断言，以及 probe 纯函数（vendor / UMA / 注册表 / nvidia-smi /
 vm_stat / 页大小回退）。跑法：`cd desktop && node test-server.js`。
+
+---
+
+## DESK-01 ~ DESK-28 最终状态表（协调者补，2024 本轮）
+
+上面各「修复记录」小节只覆盖了各自负责的文件（server.js / main.js / probe.js /
+smoke.js）。`deploy.js` 的修复以及更早的信任边界修复散落在多个提交里，这里补一张全表。
+
+| 编号 | 严重 | 最终状态 | 证据 / 修法 | 提交 |
+|---|---|---|---|---|
+| DESK-01 | 严重 | ✅ 已修 | 控制面返回的 plan 只取「窗口」这一个整数，argv 全部本地拼；控制面从不贡献可执行字符串。`test-trust.js` 11 项守住 | `95cabd0` |
+| DESK-02 | 严重 | ✅ 已修 | 引入 `item.gen` 世代计数 + `_stale(item, gen)`；旧世代在途的 `_run` 完成时直接丢弃，不再覆盖新状态、不再泄漏进程 | `9375c19` |
+| DESK-03 | 严重 | ✅ 已修 | 健康检查超时后走 `_kill()`（TERM→宽限→KILL）再置 FAILED，不留孤儿 | `9375c19` |
+| DESK-04 | 严重 | ✅ 已修 | `_kill(proc, graceMs)`：先 SIGTERM，宽限期后仍存活则 SIGKILL。llama-server / ollama 在某些状态下忽略 TERM | `9375c19` |
+| DESK-05 | 严重 | ✅ 已修 | `PULL_TIMEOUT_MS = 30 分钟`；pull 子进程注册进 `procs`（`kind: "pull"`），stop() 能触达 | `9375c19` |
+| DESK-06 | 严重 | ✅ 已修 | 与 DESK-02 同一套世代计数：start 与 stop 都会 `item.gen++`，启动过程中的 stop 不再被覆盖 | `9375c19` |
+| DESK-07 | 一般 | ✅ 已修 | `stop()` 对 ollama 先查是否还有别的 RUNNING/STARTING 且同 `model_path` 的部署；有则跳过 `keep_alive:"0"`，日志写「仍被其他部署使用，保留在 Ollama 中」 | 本轮 |
+| DESK-08 | 一般 | ✅ 已修 | `app.on("before-quit")` 回收全部子进程，Electron 退出后不再残留 llama-server | `9375c19` |
+| DESK-09 | 一般 | ✅ 已修 | 代理透传客户端请求头，只剔 hop-by-hop（connection / keep-alive / transfer-encoding / upgrade / te / trailer / proxy-* / host / content-length） | 本轮 |
+| DESK-10 | 一般 | ✅ 已修 | 上游 fetch 加 `AbortSignal.timeout`（默认 30s，`MDP_UPSTREAM_TIMEOUT_MS` 可覆盖）；超时 504、连不上 502 | 本轮 |
+| DESK-11 | 一般 | ✅ 已修 | `jsonBody()` 校验必须是普通对象；null / 数组 / 数字 / 字符串 / 非法 JSON 一律 400 | 本轮 |
+| DESK-12 | 一般 | ✅ 已修 | `health()` 在 `status !== "RUNNING"` 时直接 `healthy:false`，不再探测端口。FAILED/CREATED 不会借到别的服务的 200 | 本轮 |
+| DESK-13 | 一般 | ✅ 已修 | `_save()` 改 tmp+rename 原子写，写前重读磁盘合并别的实例新增项；`_removed` 防删除复活；`create()` 的 id 改 `_nextSeq()`（先读盘 seq 再自增）；`main.js` 加 `app.requestSingleInstanceLock()` | 本轮 |
+| DESK-14 | 一般 | ✅ 已修 | `_load()` 解析失败时 `copyFileSync` 备份到 `deployments.json.bak` + `console.error` 告警，不再静默清空 | 本轮 |
+| DESK-15 | 一般 | ✅ 已修 | 所有 `/api/deployments/{id}...` 先查存在性，GET / start / stop / health / test / DELETE 一致 404 | 本轮 |
+| DESK-16 | 一般 | ✅ 已修 | `setWindowOpenHandler` 只放行 http(s) 白名单；新增 `will-navigate` 限本地同源。`test-server.js` 有 6 条静态断言守住 | `95cabd0` |
+| DESK-17 | 轻微 | ✅ 已修 | 新增 `safePort(value, fallback)`，越界 / 非整数回退 8000 | 本轮 |
+| DESK-18 | 轻微 | ✅ 已修 | ollama 缺 `model_name`/`model_path` 时抛错（上层 400），不再写出 `model_path=undefined` | 本轮 |
+| DESK-19 | 轻微 | ✅ 已修 | `/api/health`、`/api/hardware/self`、`/api/backends` 仅 GET；各动作校验方法，不匹配 405 且带 `Allow` 头 | 本轮 |
+| DESK-20 | 轻微 | ✅ 已修 | `_load()` 把 RUNNING/STARTING 修正为 STOPPED 后立即 `_save()` 回写 | 本轮 |
+| DESK-21 | 轻微 | ✅ 已修 | 回传上游响应头（content-type / cache-control / x-upstream 等）；因 fetch 已解压，剔除 content-encoding / content-length | 本轮 |
+| DESK-22 | 轻微 | ✅ 已修 | 页大小优先 `sysctl hw.pagesize`，其次解析 `vm_stat` 头部 page size，最后回退 **4096**（不再是 16384） | 本轮 |
+| DESK-23 | 轻微 | ✅ 已修 | `classifyGpuVendor()` 覆盖 M1–M5（及 M5 Pro/Max），并优先用 `system_profiler` 的 vendor 字段 | 本轮 |
+| DESK-24 | 轻微 | ✅ 已修 | `hasBinary` 的 `execFile` 加 `timeout: 8000` | 本轮 |
+| DESK-25 | 轻微 | ✅ 已修 | `readBody` 加 1 MiB 上限，超限 413，并 drain 剩余 body 保证 413 能写回 | 本轮 |
+| DESK-26 | 轻微 | ✅ 已修 | 真机 `vm_stat` 无千位分隔符，原逻辑在真机不是 bug；仍去掉逗号做防御性修复 | 本轮 |
+| DESK-27 | 轻微 | ✅ 已修 | `gb()` 对正的极小值加下限 0.1（原来 1B/10MB/50MB 都变 0） | 本轮 |
+| DESK-28 | 轻微 | ⚪ 非 bug | 实测确认是**定义取舍**：`free + inactive + speculative` 是「当前可回收」的保守估计。purgeable 可能与 inactive 重叠、compressor 是已压缩**驻留**的物理页，都不该计入空闲。保留原公式并在代码注释写明依据 | — |
+
+**统计：28 条 = 26 条已修 + DESK-28 确认为非 bug + DESK-26 真机非 bug 但仍做了防御性修复。**
+
+### 本机无法验证的部分
+
+- Windows 相关（`windowsGpuIsUma` / `classifyGpuVendor` / 注册表解析 / nvidia-smi 回退 /
+  WSL2 检测）全部是**静态实现 + 纯函数单测**，没有在 Windows 真机跑过。详见 `windows-gaps.md`。
+- Docker 执行路径用**假二进制**测（`desktop/test-docker.js`，83 项）。本机装了 Docker Desktop
+  但守护进程未运行，**没有做过真实容器集成测试**。
+

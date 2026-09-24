@@ -477,6 +477,17 @@ grep -n "jump('" /Users/supre/Documents/tmp/model-deploy-platform/frontend/index
 
 顺带补完 F-01 的收尾：`usePick()` 原先仍 `JSON.parse(option.value)`，而 option 已改为索引，永远选不中；现改为查 `DEPLOY_MODELS`。
 
+上表之外还有 4 条（前两条的更早修复散在别的提交里，协调者补录）：
+
+| 编号 | 最终状态 | 修复 | 提交 |
+|---|---|---|---|
+| F-01 | ✅ 已修 | `option.value` 不再拼 `model_path`，改存索引，避免双引号把 value 截断；`usePick()` 同步改为查 `DEPLOY_MODELS` | 更早提交 + 本轮收尾 |
+| F-02 | ✅ 已修 | `esc()` 补齐 `"` → `&quot;`、`'` → `&#39;`（原来只转 `& < >`），带引号的 `model_path` 不能再逃出 HTML 属性 | 更早提交 |
+| F-08 | ✅ 已修（跨层） | 部署 id 改 `"dep_" + uuid.uuid4().hex[:12]`，同秒创建不再互相覆盖。属后端所有权，由后端代理修 | 更早提交 |
+| S2 | ⚪ 已失效 | 「注入的 `onmouseover` 能否被真实用户触发」不再有现实意义：F-02 关掉了属性注入，S1 又把 inline `onclick` 换成 `data-*` + 事件委托，该路径已不存在 | — |
+
+**前端统计：13 条 F-xx 全部已修，S1 已修，S2 因攻击路径消失而失效。**
+
 ### 7.3 误导性标签与 confidence（docs/probe-session-design.md §1/§6）
 
 - `hw-type` 改为「设备类型 · 容量」：UMA 显示「统一内存 · 24 GB」，独显显示「独立显存 · 12 GB」。容量优先 `total_device_gb`（物理容量），为 0/缺省时回退 `usable_vram_gb`。
@@ -499,7 +510,20 @@ grep -n "jump('" /Users/supre/Documents/tmp/model-deploy-platform/frontend/index
 - `desktop/test-backend-ui.js` 控制面模式 **10 passed / 0 failed**；桌面端模式 **21 passed / 0 failed**（下拉总数 6→7，测试断言已同步）。
 - 两个 Electron 测试都加了 `disable-http-cache` + 清缓存 + URL cache-bust，避免读到上一次的旧 index.html。
 
-### 7.5 未做
+### 7.5 未做 / 后续已闭环
 
-- 未改 `desktop/deploy.js` / `installers.js` / `backend/**`（不在所有权内）：因此当前桌面端 `/api/backends` 还不含 docker，真实桌面里选 docker 会走「本机装不了」弹框；前端按冻结契约已就绪，等桌面端落地后 docker 进入 backends 即显示表单。
-- F-08（后端 id）属后端所有权，未动。
+本代理当时**未改** `desktop/deploy.js` / `installers.js` / `backend/**`（不在所有权内），
+所以报告里写了「当前桌面端 `/api/backends` 还不含 docker，选 docker 会走『本机装不了』弹框」。
+
+**这一点现在已经闭环**（协调者补记）：桌面端 docker 后端已由另一个代理落地，
+实测运行中的 app `installable` 已包含 `docker`，前端表单随之显示。
+当前真实状态（本机，Docker Desktop 已装但守护进程未运行）：
+
+```
+backends    ["ollama"]
+installable ["llama.cpp","mlx","docker"]
+unavailable ["transformers:runtime","vllm:platform","sglang:platform"]
+caps        {"platform":"darwin","docker":false,"nvidia":false}
+```
+
+F-08（后端 id）也已由后端代理修掉（uuid4），见上表。
