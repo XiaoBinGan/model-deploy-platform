@@ -37,8 +37,10 @@
 执行生成脚本，覆盖 Windows 分支的解析逻辑（内存、注册表显存、vendor、nvidia-smi 优先），
 外加端点分派与 PS1 结构断言。共 8 条。
 
-**仍未修**：B（probeWindows 的 iGPU/vendor 判定）、C（WSL2）、D（platform 枚举校验）、
-E（打包）、F（smoke 断言）。
+**~~仍未修~~ 已全部处理**：B（probeWindows 的 iGPU/vendor 判定）、C（WSL2）、
+F（smoke 断言）见本文末「修复记录（B / C / F 节）」；
+D（platform 枚举归一化）、E（打包）见该节之后的「D 节」「E 节」。
+A–F 六节现在都有结论，逐条状态见文末。
 
 ## 二、缺口
 

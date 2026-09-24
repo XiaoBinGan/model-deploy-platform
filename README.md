@@ -116,8 +116,8 @@ flowchart TB
 | 模式 | 适用场景 | 状态 |
 |------|---------|------|
 | 本地进程 | Linux / 已装推理环境 | ✅ Transformers 已验证 |
-| Docker | Windows + WSL2 / 生产 | 📋 设计完成 |
-| WSL2 | Windows + Linux 推理 | 📋 设计完成 |
+| Docker | Windows + WSL2 / 生产 | 🟡 已实现（契约见 `docs/docker-design.md`），未做真实容器集成测试 |
+| WSL2 | Windows + Linux 推理 | 🟡 已识别 WSL2（读 `/proc/version`），未在真机验证 |
 
 ### 量化策略
 
@@ -474,7 +474,7 @@ python scripts/smoke_test.py
 
 当前状态：API 预留，未实现真实下载。下载受 `HF_HUB_OFFLINE` 环境变量阻塞。
 
-### Phase 5 — vLLM / SGLang 📋
+### Phase 5 — vLLM / SGLang 🟡
 
 ```
 真实 vLLM subprocess → /health → /v1/chat/completions
