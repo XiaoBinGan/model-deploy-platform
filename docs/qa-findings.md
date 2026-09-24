@@ -47,9 +47,10 @@
 把 argv 收归本地之后，DESK-01 直接消失，不需要引入 token 机制，
 也不需要回答「控制面是不是本机专属」这个问题——两种部署形态都安全。
 
-**已记录但未修**：B-08（plan_window 对 native 小于 64K 的模型返回 64K）
-在 backend/tests/test_qa_regressions.py 里标记为 xfail strict，
-修好之后会变成 XPASS 失败，提醒删掉标记。
+**~~已记录但未修~~ 已修**：B-08（plan_window 对 native 小于 64K 的模型返回 64K）
+当初在 backend/tests/test_qa_regressions.py 里标记为 xfail strict 作为提醒。
+后来已修复（`best = min(floor, cap)`），xfail 标记已删除，断言保留为正常测试。
+`qwen3-8b` 的 `--max-model-len` 由 65536 变为 32768。详见第六节。
 
 ## 一、11 条严重问题
 
@@ -177,3 +178,44 @@ B-13（STOPPED 部署仍报 healthy）、DESK-12（端口冲突下 FAILED 仍报
 7. 前端 DOM 层（没有任何前端测试）
 
 这是这些问题能藏到现在的直接原因。
+
+---
+
+## 六、最终状态：67 条全部处理（协调者回填）
+
+上面第一~五节是**修复前**的原始记录，保留不改，便于对照。
+本轮（feat/client-hardware-profile）之后的状态如下。
+
+| 范围 | 明细报告 | 条数 | 最终状态 |
+|---|---|---:|---|
+| 后端控制面 | `docs/qa-findings-backend.md` §6 | 24 | **24/24 已处理** |
+| 桌面端 | `docs/qa-findings-desktop.md` 末节 | 28 | **26 已修 + 1 非 bug（DESK-28）+ 1 防御性修复（DESK-26）** |
+| 前端 | `docs/qa-findings-frontend.md` §7 | 15 | **13 已修 + S1 已修 + S2 攻击路径消失** |
+| **合计** | | **67** | **全部有结论** |
+
+三份明细报告各自新增了逐条状态表（含「已修 / 非 bug / 未验证」三态和证据），
+独立的证伪复查见 `docs/qa-round3.md`（该报告又找出 12 条问题，也已全部处理）。
+
+### 测试盲区已经补上
+
+第五节列出的 7 个盲区，现在都有对应测试：
+
+| 盲区 | 现在覆盖它的测试 |
+|---|---|
+| 1. HTTP 层错误映射 | `backend/tests/test_deploy_api_contract.py`、`test_trust_boundary.py` |
+| 2. 输入数值健壮性 | `test_qa_regressions.py`、`test_client_hardware.py` |
+| 3. 命令字符串安全 | `test_core.py`、`test_planner_platform.py`、`desktop/test-trust.js` |
+| 4. 并发与唯一性 | `test_qa_regressions.py`（uuid 唯一性）、`test_deployments_resilience.py` |
+| 5. 子进程生命周期 | `desktop/test-docker.js`（含忽略 SIGTERM 的 SIGKILL 用例）、`test-mlx.js` |
+| 6. 跨源/信任边界 | `test_trust_boundary.py`、`desktop/test-trust.js`（含 docker 用例） |
+| 7. 前端 DOM 层 | `desktop/test-frontend.js`（真 Electron 加载 index.html，37 项） |
+
+### 仍然无法验证的（不要当成已完成）
+
+1. **Windows 真机行为**——所有 Windows 相关代码是静态实现 + 纯函数单测，
+   本机 macOS 跑不了。详见 `docs/windows-gaps.md`。
+2. **真实容器集成**——本机 Docker Desktop 已安装但守护进程未运行；
+   docker 执行路径用假二进制测（`desktop/test-docker.js`，89 项），**没有跑过真容器**。
+3. **Windows 安装包**——nsis 配置已写，没有在 Windows 上构建或运行过。
+4. **macOS 公证**——打包产物未做 notarization。
+
