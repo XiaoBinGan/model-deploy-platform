@@ -589,3 +589,43 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 | v0.8 | 性能测试（TTFT / 吞吐 / P95） |
 | v1.0 | 多 GPU + 远程节点 |
 | v2.0 | Kubernetes + 多模型路由 |
+
+---
+
+## 十二、TODO
+
+### Windows：代码已写，但**没有在 Windows 真机上验证过**
+
+> 本项目的开发和全部测试都在 macOS（Apple M5）上完成。下面每一项都写了代码，
+> 也都有纯函数单测或静态审查，但**没有一项在真实 Windows / WSL 上执行过**。
+> 在真机复核之前，不要把这些当成「Windows 支持已完成」。
+> 逐条细节见 `docs/windows-gaps.md`。
+
+| # | 项目 | 现状 | 需要在真机上做什么 |
+|---|---|---|---|
+| W1 | 整条 `probeWindows()` 路径 | 仅静态审查 + 纯函数单测 | 在真 Windows 上跑一次硬件探测，与 `systeminfo` / 任务管理器对照 |
+| W2 | 注册表读显存 `HardwareInformation.qwMemorySize`（REG_QWORD） | 按已知事实实现（`Win32_VideoController.AdapterRAM` 是 uint32，>4 GB 会截断，所以不用它） | 在显存 >4 GB 的机器上确认读到的值与实际一致 |
+| W3 | `windowsGpuIsUma()` 集显判定 | 纯函数测了 30+ 个机型名 | 收集**真实机器上报的 GPU 字符串**（OEM / 驱动差异很大）复核；老 APU 与移动独显的边界最需要验 |
+| W4 | `classifyGpuVendor()` | 同上 | 确认 Windows 上报的 vendor 字符串能被正确归类 |
+| W5 | `nvidia-smi` 不在 PATH 时的回退 | 已实现三条路径（PATH / `%SystemRoot%\System32` / `NVSMI` 目录） | 在没有把 nvidia-smi 加进 PATH 的机器上确认回退生效 |
+| W6 | 多路 CPU（`Win32_Processor.Name` 返回多行） | 已去重并用 `Join(' + ')` 合并 | 在多路机器上确认 |
+| W7 | WSL2 检测（读 `/proc/version`） | 已实现 | 在真 WSL2 里确认识别成功，并确认**不再把 WSL 的内存限额当宿主机内存** |
+| W8 | `GET /api/hardware/probe.ps1` 端点 | 已实现（61 行，不依赖 Python） | 在 Windows PowerShell 5.1 **和** 7 上各跑一次 |
+| W9 | `probe-command` 的平台分派（`irm ... \| iex`） | 已按平台分派 | 在 Windows 上确认命令真能执行 |
+| W10 | electron-builder 的 **nsis 安装包** | 配置已写（x64） | 在 Windows 上 `npm run dist` 构建 → 安装 → 运行 |
+| W11 | Windows 上的 Docker GPU 路径 | 文档记录「Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供」 | 在 Windows + WSL2 + NVIDIA 上实测 `--gpus all` 是否真的生效 |
+
+**真机复核时一并确认这几个历史坑**（代码里都已修，但都没在 Windows 上验过）：
+
+- `AMD Radeon(TM) Graphics` —— 厂商后缀 `(TM)` 曾导致匹配失败
+- `AMD Radeon 780M` 家族 —— 曾被判成独显
+- 老一代 APU：`Radeon HD 8650G` / `Radeon R7 Graphics` —— 曾被判成独显
+- **不能误判**成集显的：`Radeon HD 7970`、`Radeon R7 240`、`Radeon R7 M260`、`Arc A770M`
+
+### 其他未验证项
+
+| # | 项目 | 现状 |
+|---|---|---|
+| T1 | Docker **真实容器集成** | 开发机装了 Docker Desktop 但守护进程未运行；执行路径用假二进制测（`desktop/test-docker.js`，89 项），**没跑过真容器** |
+| T2 | macOS 打包产物公证（notarization） | 未做。`npx electron-builder --dir --mac` 能构建，代码签名自动跳过 |
+
