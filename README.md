@@ -626,6 +626,6 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 
 | # | 项目 | 现状 |
 |---|---|---|
-| T1 | Docker **真实容器集成** | 开发机装了 Docker Desktop 但守护进程未运行；执行路径用假二进制测（`desktop/test-docker.js`，89 项），**没跑过真容器** |
+| T1 | Docker **真实容器集成** | 🟡 部分完成。容器生命周期已用真容器验证（见下），但**没有 GPU 直通**，也没有跑过真的推理镜像 |
 | T2 | macOS 打包产物公证（notarization） | 未做。`npx electron-builder --dir --mac` 能构建，代码签名自动跳过 |
 

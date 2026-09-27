@@ -12,6 +12,22 @@ const path = require("node:path");
 
 const MLX_VENV = ".mdp-mlx";
 
+// Official images. The docker backend already derives the container port and the
+// image-specific flags from the image name (docs/docker-design.md 3-4), so running
+// vLLM through a container is the *same deploy path* as any other image. What was
+// missing was a one-click way to get the image onto the machine: installPlan()
+// offered only `pip install` on Linux and refused Windows outright, while gpuPath()
+// in the same file told the user Docker was the more common route. The app said
+// "use Docker" and then did not offer Docker.
+const OFFICIAL_IMAGE = {
+  vllm: "vllm/vllm-openai:latest",
+  sglang: "lmsysorg/sglang:latest",
+};
+
+function officialImage(name) {
+  return OFFICIAL_IMAGE[name] || null;
+}
+
 // One line each, shown above the install offer so the user knows what they are
 // being asked to install.
 const BACKEND_INFO = {
@@ -56,8 +72,8 @@ function gpuPath(caps) {
   }
   if (platform === "win32") {
     if (nvidia && docker) {
-      return "这台机器有 NVIDIA 显卡，Docker 也在运行：vLLM 可以通过 WSL2 + Docker 跑起来。" +
-        "本 app 还没有这条部署路径，需要在 WSL2 里手动 docker run。";
+      return "这台机器有 NVIDIA 显卡，Docker 也在运行：可以直接一键拉取官方镜像，" +
+        "再用 docker 后端部署（容器跑在 WSL2 后端里，GPU 由 Docker Desktop 直通）。";
     }
     if (nvidia) {
       return "检测到 NVIDIA 显卡，但没有可用的 Docker。装 Docker Desktop（WSL2 后端）之后" +
@@ -71,8 +87,8 @@ function gpuPath(caps) {
       "vllm/vllm-openai 是更常见的做法（需要 nvidia-container-toolkit）。";
   }
   if (nvidia) {
-    return "检测到 NVIDIA 显卡。除了上面的 pip 安装，也可以用官方镜像" +
-      "（需要 nvidia-container-toolkit）。";
+    return "检测到 NVIDIA 显卡，但没有可用的 Docker。装好 Docker 与" +
+      " nvidia-container-toolkit 后可以一键拉官方镜像，也可以直接 pip 安装。";
   }
   return "没有检测到 NVIDIA/AMD 显卡：vLLM 有 CPU 后端，但速度远达不到可用水平。";
 }
@@ -146,14 +162,33 @@ async function installPlan(name, ctx) {
 
   if (name === "vllm" || name === "sglang") {
     const gpu = gpuPath(ctx.caps || { platform });
-    if (platform === "linux") {
-      const pkg = name === "vllm" ? "vllm" : "sglang[all]";
+    const image = officialImage(name);
+    const caps = ctx.caps || {};
+    const docker = !!caps.docker;
+    const nvidia = !!caps.nvidia;
+
+    // One click, one `docker pull`. Only where a container can actually get a
+    // GPU: Linux with nvidia-container-toolkit, or Windows through the WSL2
+    // backend. Measured, not assumed - see the darwin branch below for what
+    // the same command does on a Mac.
+    if (docker && nvidia && (platform === "linux" || platform === "win32")) {
       const steps = [{
-        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）",
-        argv: ["python3", "-m", "pip", "install", pkg],
+        note: "拉取官方镜像 " + image + "（只有一个步骤，拉完就能部署）",
+        argv: ["docker", "pull", image],
       }];
-      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
+      return {
+        ok: true,
+        backend: name,
+        steps,
+        manual: manual(steps),
+        via: "docker",
+        image,
+        gpu: gpu + (platform === "win32"
+          ? "（容器跑在 WSL2 后端里，GPU 由 Docker Desktop 直通）"
+          : "（需要 nvidia-container-toolkit）"),
+      };
     }
+
     if (platform === "darwin") {
       return cannot(
         name + " 官方只发 manylinux 的 x86_64 / aarch64 wheel，没有 macOS 版本。" +
@@ -163,6 +198,25 @@ async function installPlan(name, ctx) {
         gpu
       );
     }
+
+    if (docker && !nvidia && platform === "linux") {
+      const pkg = name === "vllm" ? "vllm" : "sglang[all]";
+      const steps = [{
+        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）",
+        argv: ["python3", "-m", "pip", "install", pkg],
+      }];
+      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
+    }
+
+    if (platform === "linux") {
+      const pkg = name === "vllm" ? "vllm" : "sglang[all]";
+      const steps = [{
+        note: "装到当前 Python 环境（需要 NVIDIA/AMD 驱动和 CUDA/ROCm）",
+        argv: ["python3", "-m", "pip", "install", pkg],
+      }];
+      return { ok: true, backend: name, steps, manual: manual(steps), gpu };
+    }
+
     return cannot(
       name + " 不能在原生 Windows 上跑。",
       "https://docs.vllm.ai/en/latest/deployment/docker.html",
@@ -217,4 +271,4 @@ async function installPlan(name, ctx) {
   return cannot("桌面端不认识这个后端。");
 }
 
-module.exports = { installPlan, gpuPath, BACKEND_INFO, MLX_VENV };
+module.exports = { installPlan, gpuPath, BACKEND_INFO, MLX_VENV, officialImage, OFFICIAL_IMAGE };

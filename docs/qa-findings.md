@@ -214,8 +214,11 @@ B-13（STOPPED 部署仍报 healthy）、DESK-12（端口冲突下 FAILED 仍报
 
 1. **Windows 真机行为**——所有 Windows 相关代码是静态实现 + 纯函数单测，
    本机 macOS 跑不了。详见 `docs/windows-gaps.md`。
-2. **真实容器集成**——本机 Docker Desktop 已安装但守护进程未运行；
-   docker 执行路径用假二进制测（`desktop/test-docker.js`，89 项），**没有跑过真容器**。
+2. **真实容器集成**——守护进程未运行，docker 执行路径用假二进制测
+   （`desktop/test-docker.js`，89 项）。**本轮已补上一部分**：启动 Docker Desktop 后，
+   用应用真实跑通了「拉镜像 → 启动容器 → `docker rm -f` 清理」，
+   容器确实以 `mdp-<部署 id>` 为名、按算出的端口映射运行；
+   但**没有 GPU 直通**（macOS 容器拿不到 GPU），也没跑过真的推理镜像。
 3. **Windows 安装包**——nsis 配置已写，没有在 Windows 上构建或运行过。
 4. **macOS 公证**——打包产物未做 notarization。
 

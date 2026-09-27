@@ -10,6 +10,35 @@ Docker 部署要同时落到四个地方（控制面规划、桌面端执行、�
 所以先把「谁提供什么、什么形状、什么被拒绝」写死。
 
 **信任边界不变**：控制面是提示源，不是命令源。
+
+## 0.1 GPU 直通：实测的平台差异（不要靠推理）
+
+「都是 Docker，所以各平台一样」是错的，而且这个错误会直接导致推荐假象。
+在这台机器（Apple M5，macOS，Docker Desktop 4.38.0 / Docker 27.5.1）实测：
+
+```
+$ docker run --rm --gpus all alpine true
+docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]].
+
+$ docker run --rm --device /dev/dri alpine ls /dev/dri
+docker: Error response ... /dev/dri: no such file or directory
+
+$ docker info --format '{{.OSType}} {{.Architecture}} {{.NCPU}} {{.MemTotal}}'
+linux aarch64 8 8217858048          # 8 核 / 8 GB，宿主有 10 核 / 24 GB
+```
+
+结论：**macOS 上的容器运行时是一个 Linux 虚拟机，拿不到任何 GPU**
+（没有 `/dev/dri`、没有 `/dev/nvidia*`，`--gpus` 直接让 Docker 拒绝启动）。
+所以官方 `vllm/vllm-openai`（CUDA 镜像）在 Mac 上根本起不来。
+
+| 平台 | 容器能拿到 GPU 吗 | vLLM/SGLang 容器可用吗 |
+|---|---|---|
+| Linux（+ nvidia-container-toolkit） | 能 | 能，GPU 直通 |
+| Windows（Docker Desktop，WSL2 后端） | 能 | 能，GPU 由 WSL2 直通 |
+| **macOS** | **不能** | **不能**；只有 CPU，速度不可用 |
+
+对应的代码：`desktop/installers.js` 的 `gpuPath()`。GPU 直通不是靠平台名猜的，
+而是 `_caps()` 实测出来的（`docker info` 通不通 + `nvidia-smi` 在不在）。
 桌面端**本地**拼 docker argv，控制面返回的 `command` 永远不被执行
 （见 `docs/trust-boundary.md`）。
 

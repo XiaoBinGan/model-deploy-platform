@@ -67,8 +67,13 @@ const allTools = () => Promise.resolve(true);
 
   check("macOS：明确回答 Docker 也不行",
     gpuPath({ platform: "darwin", docker: true, nvidia: false }).indexOf("Docker 也拿不到 GPU") >= 0);
-  check("Windows：有显卡 + Docker 时给出可行路径",
-    gpuPath({ platform: "win32", docker: true, nvidia: true }).indexOf("WSL2 + Docker") >= 0);
+  // Wording updated when the route became real: this used to say "本 app 还没有
+  // 这条部署路径，需要在 WSL2 里手动 docker run", which is no longer true.
+  {
+    const win = gpuPath({ platform: "win32", docker: true, nvidia: true });
+    check("Windows：有显卡 + Docker 时给出可行路径（一键拉镜像 + WSL2 直通）",
+      win.indexOf("一键拉取官方镜像") >= 0 && win.indexOf("WSL2") >= 0, win);
+  }
   check("Windows：有显卡但没 Docker 时说去装 Docker",
     gpuPath({ platform: "win32", docker: false, nvidia: true }).indexOf("装 Docker Desktop") >= 0);
   check("Windows：没显卡时说这条路不通",
@@ -179,6 +184,60 @@ const allTools = () => Promise.resolve(true);
   check("SSE 每帧都以 data: 开头并以空行结尾",
     r2.raw().split("\n\n").filter((b) => b.trim()).every((b) => b.indexOf("data: ") === 0),
     JSON.stringify(r2.raw().slice(0, 40)));
+
+  // --- vLLM / SGLang 的 Docker 一键安装路径 -------------------------------
+  // Before this, installPlan() offered only `pip install` on Linux and refused
+  // Windows outright, while gpuPath() in the same file told the user that
+  // `docker run --gpus all vllm/vllm-openai` was the more common route. The app
+  // said "use Docker" and then did not offer Docker.
+  {
+    const withCaps = (base, platform, docker, nvidia) =>
+      ({ ...base, caps: { platform, docker, nvidia } });
+    const linGpu = withCaps(lin, "linux", true, true);
+    const winGpu = withCaps(win, "win32", true, true);
+    const macDocker = withCaps(mac, "darwin", true, false);
+    const linNoDocker = withCaps(lin, "linux", false, true);
+
+    const lv = await installPlan("vllm", linGpu);
+    check("linux + NVIDIA + Docker：一键拉官方镜像（一个步骤）",
+      lv.ok && lv.via === "docker" && lv.steps.length === 1 &&
+      lv.steps[0].argv.join(" ") === "docker pull vllm/vllm-openai:latest",
+      lv.ok ? lv.steps.map((s) => s.argv.join(" ")).join(" && ") : lv.reason);
+
+    const wv = await installPlan("vllm", winGpu);
+    check("Windows + NVIDIA + Docker：也能一键拉镜像（走 WSL2 后端）",
+      wv.ok && wv.via === "docker" &&
+      wv.steps[0].argv.join(" ") === "docker pull vllm/vllm-openai:latest",
+      wv.ok ? wv.steps[0].argv.join(" ") : wv.reason);
+
+    const ws = await installPlan("sglang", winGpu);
+    check("SGLang 在 Windows + Docker 上拉的是 sglang 镜像",
+      ws.ok && ws.steps[0].argv.join(" ") === "docker pull lmsysorg/sglang:latest",
+      ws.ok ? ws.steps[0].argv.join(" ") : ws.reason);
+
+    check("macOS 有 Docker 也仍然拒绝（容器拿不到 GPU，实测 --gpus all 直接报错）",
+      !(await installPlan("vllm", macDocker)).ok &&
+      !(await installPlan("sglang", macDocker)).ok);
+
+    const lnd = await installPlan("vllm", linNoDocker);
+    check("linux 有 NVIDIA 但没有 Docker：退回 pip",
+      lnd.ok && lnd.via !== "docker" && lnd.steps[0].argv.join(" ").indexOf("pip install vllm") >= 0,
+      lnd.ok ? lnd.steps[0].argv.join(" ") : lnd.reason);
+
+    // Windows without a live Docker has no route at all: there is no native
+    // Windows vLLM, so the refusal must stay a refusal rather than fall back to
+    // a pip command that cannot work.
+    const wn = await installPlan("vllm", withCaps(win, "win32", false, true));
+    check("Windows 没有 Docker 时仍然拒绝，不回退到跑不通的 pip",
+      !wn.ok && wn.kind === "platform", wn.ok ? "竟然 ok" : wn.kind);
+
+    // The image name must be a local constant, never anything derived from a
+    // request - same rule as the launch argv.
+    const { OFFICIAL_IMAGE } = require("./installers");
+    check("镜像名是本地常量，且与 docker 后端的默认镜像一致",
+      OFFICIAL_IMAGE.vllm === "vllm/vllm-openai:latest" && OFFICIAL_IMAGE.sglang === "lmsysorg/sglang:latest",
+      JSON.stringify(OFFICIAL_IMAGE));
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log("\n" + pass + " passed, " + fail + " failed");
