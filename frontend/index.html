@@ -578,7 +578,7 @@ function backendNote(b){
   if(st.kind==='installable'){
     // A pulled Docker image is installed in every sense that matters, so say so
     // rather than offering the same download again.
-    return (st.data&&st.data.alreadyInstalled)?' · 镜像已就绪，可直接部署':' · 未安装，可一键安装';
+    return (st.data&&st.data.alreadyInstalled)?' · 镜像已就绪（用 docker 部署）':' · 未安装，可一键安装';
   }
   // "Cannot be installed here" and "this app cannot run it" are different
   // answers, and the second one is not fixed by installing anything.
@@ -649,6 +649,24 @@ function copyModalCommand(){
   });
 }
 
+// "The image is already local, now what?" - this is the answer. Hand the user
+// the exact deployment the install note describes, instead of closing the dialog
+// and leaving them to work out that the runtime is the docker backend.
+function useDockerFor(image){
+  closeModal();
+  var sel=document.getElementById('d-backend');
+  if(!sel){return;}
+  sel.value='docker';
+  sel.dispatchEvent(new Event('change'));
+  // Only after the change handler has decided whether docker is selectable:
+  // if it reverted, writing the image would describe a deployment that cannot run.
+  if(sel.value!=='docker'){return;}
+  var img=document.getElementById('d-image');
+  if(img&&image){img.value=image;}
+  var block=document.getElementById('d-docker');
+  if(block&&block.scrollIntoView){block.scrollIntoView({behavior:'smooth',block:'center'});}
+}
+
 function openInstallModal(b){
   var st=backendStatus(b);
   var info=(st.data&&st.data.info)||'';
@@ -685,11 +703,21 @@ function openInstallModal(b){
     html+='<pre>'+esc(d.manual||'')+'</pre>';
     body.innerHTML=html;
     // Nothing left to run, so do not offer a button that would do nothing.
+    // One click to the deployment, not just "nothing to do". Only offered when
+    // the plan actually names a runnable backend and image.
+    var canJump=done&&d.via==='docker'&&!!d.image;
     actions.innerHTML=done
-      ? '<button class="mini" id="m-close5">关闭</button>'
+      ? (canJump
+          ? '<button class="primary" id="m-use">用 docker 后端部署</button>' +
+            '<button class="mini" id="m-close5">关闭</button>'
+          : '<button class="mini" id="m-close5">关闭</button>')
       : '<button class="primary" id="m-install">确认安装</button>' +
         '<button class="mini" id="m-copy">复制命令</button>';
-    if(done){document.getElementById('m-close5').onclick=closeModal;return;}
+    if(done){
+      document.getElementById('m-close5').onclick=closeModal;
+      if(canJump){document.getElementById('m-use').onclick=function(){useDockerFor(d.image);};}
+      return;
+    }
     document.getElementById('m-install').onclick=function(){runInstall(b);};
     document.getElementById('m-copy').onclick=copyModalCommand;
     return;

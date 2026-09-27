@@ -162,9 +162,56 @@ app.whenReady().then(async () => {
   check("已拉取的镜像在下拉里标为「镜像已就绪」", /镜像已就绪/.test(ready.note), ready.note);
   check("已就绪时弹框打开且状态是「已在本地」", ready.shown === true && ready.body.indexOf('官方镜像已在本地') >= 0);
   check("已就绪时不再显示「确认安装」按钮", ready.hasInstallBtn === false);
-  check("已就绪时只给关闭按钮", ready.hasCloseBtn === true);
   check("已就绪时说明里指向 docker 后端", ready.body.indexOf('docker 后端') >= 0);
   check("已就绪时不再列出将执行的步骤，显示「无需操作」", ready.body.indexOf('无需操作') >= 0);
+
+  // 关键：不能只说「无需操作」就把用户丢下。按钮要真的把人送到部署表单，
+  // 并且把镜像填成刚装好的那个。
+  const jumped = await run(`(() => {
+    window.CONFIG = {
+      backends: ['docker', 'ollama'], local: true,
+      caps: { platform: 'linux', docker: true, nvidia: true },
+      unavailable: {},
+      installable: { vllm: {
+        info: 'x', steps: [], manual: 'docker pull vllm/vllm-openai:latest',
+        via: 'docker', image: 'vllm/vllm-openai:latest', alreadyInstalled: true,
+        note: 'n', gpu: 'g' } },
+    };
+    fillBackends();
+    document.getElementById('d-image').value = 'something-else:tag';
+    openInstallModal('vllm');
+    const hadButton = !!document.getElementById('m-use');
+    if (hadButton) document.getElementById('m-use').click();
+    const sel = document.getElementById('d-backend');
+    const block = document.getElementById('d-docker');
+    const modalGone = getComputedStyle(document.getElementById('modal')).display === 'none';
+    return {
+      hadButton,
+      backend: sel.value,
+      image: document.getElementById('d-image').value,
+      blockShown: block.style.display !== 'none',
+      modalGone,
+    };
+  })()`);
+  check("已就绪时给出「用 docker 后端部署」按钮", jumped.hadButton === true);
+  check("点它会切到 docker 后端", jumped.backend === 'docker', jumped.backend);
+  check("点它会把镜像填成刚装好的那个镜像", jumped.image === 'vllm/vllm-openai:latest', jumped.image);
+  check("点它之后 docker 参数区块可见", jumped.blockShown === true);
+  check("点它之后弹框关闭", jumped.modalGone === true);
+
+  // 一个装不了的后端不该出现这个跳转按钮（跳过去也跑不起来）。
+  const noJump = await run(`(() => {
+    window.CONFIG.installable.vllm.alreadyInstalled = true;
+    window.CONFIG.installable.vllm.via = 'pip';
+    openInstallModal('vllm');
+    const has = !!document.getElementById('m-use');
+    const hasClose = !!document.getElementById('m-close5');
+    closeModal();
+    return { has, hasClose };
+  })()`);
+  check("非 docker 途径的已就绪项不给出跳转按钮，但仍可关闭",
+    noJump.has === false && noJump.hasClose === true,
+    JSON.stringify(noJump));
 
   // A not-yet-pulled image must still offer the install button - the ready state
   // above must not swallow the normal case.
