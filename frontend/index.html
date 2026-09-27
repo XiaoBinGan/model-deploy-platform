@@ -4,13 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- This page renders data from a control plane the desktop does not trust, so it
-     must not be able to pull in remote script/frame/object content. `unsafe-inline`
-     is required by the app's own inline script and inline event handlers; it is NOT
-     a substitute for escaping, which is why esc()/textContent are still the primary
-     defence. frame-ancestors and sandbox are deliberately absent: they are ignored
-     when delivered via <meta>, and listing them here would imply protection that
-     does not exist. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+     must not be able to pull in remote script/frame/object content, and an injected
+     <script> must not run either.
+
+     script-src allows only our own inline script, by nonce. Nothing else needs it:
+     all handlers are delegated from data-act/data-change attributes, so there are no
+     inline onclick/onchange attributes left (and none can be injected usefully -
+     script-src-attr falls back to script-src, so injected handlers are refused too).
+
+     The nonce is a fixed string in a static file, not a per-response value: this file
+     is served as-is by both the desktop server and the control plane, with no
+     templating to generate one. It is still worth having - an injected tag cannot
+     guess it, and the DOM hides nonce values from getAttribute - but it is NOT a
+     substitute for escaping. esc()/textContent remain the primary defence.
+
+     style-src still needs 'unsafe-inline': the page has one inline <style> block and
+     inline style="" attributes throughout.
+
+     frame-ancestors and sandbox are deliberately absent: they are ignored when
+     delivered via <meta>, and listing them here would imply protection that does
+     not exist. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-mdp-static-1'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>ModelForge</title>
 <style>
 :root{--bg:#0b0d10;--surface:#12161b;--raised:#181e25;--border:#252d37;--text:#e8edf3;--muted:#8b96a5;--primary:#8290ff;--ok:#32d583;--warn:#fdb022;--danger:#f97066;--pad:24px}
@@ -86,7 +100,7 @@ details.card[open]>summary{margin-bottom:12px}
   <span class="dot" id="status-dot"></span>
   <span id="status-text">正在检测…</span>
   <span class="grow"></span>
-  <button class="mini" onclick="refresh()">重新检测</button>
+  <button class="mini" data-act="refresh">重新检测</button>
 </div>
 
 <div class="hw">
@@ -100,13 +114,13 @@ details.card[open]>summary{margin-bottom:12px}
   <div class="head">
     <h2>推荐模型</h2>
     <span class="muted" id="backend-hint" style="font-size:12px"></span>
-    <select id="backend" onchange="refresh()" style="margin-left:auto;width:auto">
+    <select id="backend" data-change="refresh" style="margin-left:auto;width:auto">
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option>
     </select>
   </div>
   <div class="pick" id="pick">加载中…</div>
-  <div class="actions"><button class="primary" onclick="usePick()">部署这个模型</button></div>
+  <div class="actions"><button class="primary" data-act="usePick">部署这个模型</button></div>
 </section>
 
 <section class="card" id="deploy">
@@ -114,17 +128,17 @@ details.card[open]>summary{margin-bottom:12px}
     <h2>部署</h2>
     <span class="muted" id="deploy-sub">创建 → 启动 → 健康检查</span>
     <span class="grow"></span>
-    <a href="#" style="font-size:12px;margin-right:10px" onclick="jump('service');return false">服务测试 →</a>
-    <button class="primary" id="deploy-btn" onclick="createDeploy()">创建并启动</button>
+    <a href="#" data-act="jump" data-jump="service" style="font-size:12px;margin-right:10px">服务测试 →</a>
+    <button class="primary" id="deploy-btn" data-act="createDeploy">创建并启动</button>
   </div>
   <div id="deploy-advisory" class="advisory" style="display:none">
     <div class="muted">服务端不能把模型部署到你的机器上。请在本机执行：</div>
     <pre id="advisory-cmd" style="margin-top:8px">—</pre>
-    <div class="actions"><button class="mini" onclick="copyAdvisory()">复制命令</button></div>
+    <div class="actions"><button class="mini" data-act="copyAdvisory">复制命令</button></div>
   </div>
   <div class="form">
-    <div class="field wide"><label for="d-model">模型</label><select id="d-model" onchange="syncDeploy()"></select></div>
-    <div class="field"><label for="d-backend">后端</label><select id="d-backend" onchange="syncDeploy()">
+    <div class="field wide"><label for="d-model">模型</label><select id="d-model" data-change="syncDeploy"></select></div>
+    <div class="field"><label for="d-backend">后端</label><select id="d-backend" data-change="syncDeploy">
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option></select></div>
     <div class="field"><label for="d-port">端口</label><input id="d-port" type="number" min="1024" max="65535" step="1" value="11434"></div>
@@ -133,7 +147,7 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="field wide" id="d-docker" style="display:none">
       <div class="form">
         <div class="field"><label for="d-image">镜像</label><input id="d-image" type="text" value="vllm/vllm-openai:latest" spellcheck="false"></div>
-        <div class="field"><label for="d-gpus">GPU</label><select id="d-gpus" onchange="this.setAttribute('data-touched','1')">
+        <div class="field"><label for="d-gpus">GPU</label><select id="d-gpus" data-change="touched">
           <option value="all">all</option><option value="none">none</option>
           <option value="0">0</option><option value="0,1">0,1</option></select></div>
         <div class="field wide"><label for="d-volumes">数据卷（每行 host:container[:ro]，绝对路径）</label><textarea id="d-volumes" rows="2" placeholder="/Users/me/models:/models:ro"></textarea></div>
@@ -159,8 +173,8 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="field wide"><label for="t-msg">提示词</label><textarea id="t-msg" rows="2">你好，请用一句话介绍你自己</textarea></div>
     <div class="field"><label for="t-max">最大 Token</label><input id="t-max" type="number" min="1" max="1048576" step="1" value="512"></div>
     <div class="field" style="display:flex;align-items:flex-end;gap:8px">
-      <button class="primary" onclick="runTest()">发送测试</button>
-      <button class="mini" onclick="healthCheck()">健康检查</button>
+      <button class="primary" data-act="runTest">发送测试</button>
+      <button class="mini" data-act="healthCheck">健康检查</button>
     </div>
   </div>
   <div class="muted" style="font-size:12px;margin:12px 0 5px">API 地址</div>
@@ -186,16 +200,16 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="field wide"><label for="pf-code">档案码 / 粘贴的 JSON</label><textarea id="pf-code" rows="2" placeholder="mdp1.xxxx.yyyy"></textarea></div>
   </div>
   <div class="actions">
-    <button class="primary" onclick="applyProfileForm()">应用并重新推荐</button>
-    <button class="mini" onclick="runBrowserProbe()">重新检测本机</button>
-    <button class="mini" onclick="copyCode()">生成档案码</button>
-    <button class="mini" onclick="parseCode()">解析粘贴内容</button>
+    <button class="primary" data-act="applyProfileForm">应用并重新推荐</button>
+    <button class="mini" data-act="runBrowserProbe">重新检测本机</button>
+    <button class="mini" data-act="copyCode">生成档案码</button>
+    <button class="mini" data-act="parseCode">解析粘贴内容</button>
   </div>
   <div class="muted" style="font-size:12px;margin:12px 0 5px">归一化结果</div>
   <div id="pf-out" class="log">—</div>
   <div class="muted" style="font-size:12px;margin:12px 0 5px">本机精确探测（在你自己的机器上执行，把输出粘回上方）</div>
   <pre id="pf-cmd">—</pre>
-  <div class="actions"><button class="mini" onclick="copyProbe()">复制探测命令</button></div>
+  <div class="actions"><button class="mini" data-act="copyProbe">复制探测命令</button></div>
 </details>
 
 <details class="card"><summary>环境检测 · 服务器</summary>
@@ -204,12 +218,12 @@ details.card[open]>summary{margin-bottom:12px}
   <pre id="raw-env">—</pre>
 </details>
 
-<div id="modal" class="modal-bg" style="display:none" onclick="if(event.target===this)closeModal()">
+<div id="modal" class="modal-bg" style="display:none" data-act="backdrop">
   <div class="modal">
     <div class="head">
       <h2 id="m-title">安装后端</h2>
       <span class="grow"></span>
-      <button class="mini" onclick="closeModal()">关闭</button>
+      <button class="mini" data-act="closeModal">关闭</button>
     </div>
     <div id="m-body"></div>
     <div class="actions" id="m-actions"></div>
@@ -218,7 +232,7 @@ details.card[open]>summary{margin-bottom:12px}
 </div>
 
 </main>
-<script>
+<script nonce="mdp-static-1">
 function jump(id){
   var el=document.getElementById(id);
   if(!el){return;}
@@ -233,6 +247,53 @@ function copyText(text){
   var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
 }
 var LAST=null, DEPLOYMENTS=[], CONFIG={}, PROFILE={source:'browser',platform:'unknown',architecture:'',cpu_cores:null,ram_gb:null,gpus:[]}, GPU_TABLE=null;
+
+// Every interaction goes through delegation instead of inline onclick/onchange
+// attributes. That is not a style preference: the CSP dropped script-src
+// 'unsafe-inline', so inline handlers - and any inline <script> an attacker
+// manages to inject through control-plane data - are refused by the browser.
+// Delegation also means the renderers below can emit buttons without wiring a
+// listener after every re-render.
+//
+// The nonce is a fixed string in a static file, not a per-response value. It is
+// still useful: an injected tag cannot guess it, and the DOM hides nonce values
+// from getAttribute. It is NOT a substitute for escaping.
+var ACTIONS={
+  refresh:function(){refresh();},
+  usePick:function(){usePick();},
+  createDeploy:function(){createDeploy();},
+  copyAdvisory:function(){copyAdvisory();},
+  runTest:function(){runTest();},
+  healthCheck:function(){healthCheck();},
+  applyProfileForm:function(){applyProfileForm();},
+  runBrowserProbe:function(){runBrowserProbe();},
+  copyCode:function(){copyCode();},
+  parseCode:function(){parseCode();},
+  copyProbe:function(){copyProbe();},
+  closeModal:function(){closeModal();},
+  quickRam:function(el){quickRam(+(el.getAttribute('data-ram')||0));},
+  jump:function(el){jump(el.getAttribute('data-jump'));},
+  // Only the backdrop closes it; a click on the dialog itself must not.
+  backdrop:function(el,ev){if(ev.target===el){closeModal();}}
+};
+document.addEventListener('click',function(ev){
+  var el=ev.target&&ev.target.closest?ev.target.closest('[data-act]'):null;
+  if(!el){return;}
+  var name=el.getAttribute('data-act');
+  var fn=ACTIONS[name];
+  if(!fn){return;}
+  // <a href="#"> would otherwise jump the page to the top.
+  if(el.tagName==='A'||name==='jump'){ev.preventDefault();}
+  fn(el,ev);
+});
+document.addEventListener('change',function(ev){
+  var el=ev.target&&ev.target.closest?ev.target.closest('[data-change]'):null;
+  if(!el){return;}
+  var name=el.getAttribute('data-change');
+  if(name==='refresh'){refresh();}
+  else if(name==='syncDeploy'){syncDeploy();}
+  else if(name==='touched'){el.setAttribute('data-touched','1');}
+});
 
 function detectGPUName(){
   try{
@@ -355,7 +416,7 @@ function quickRam(gb){
 function renderPresets(){
   var sizes=[8,16,18,24,32,36,48,64,96,128];
   document.getElementById('pf-presets').innerHTML=sizes.map(function(s){
-    return '<button class="mini" style="margin:2px" onclick="quickRam('+s+')">'+s+' GB</button>';
+    return '<button class="mini" style="margin:2px" data-act="quickRam" data-ram="'+s+'">'+s+' GB</button>';
   }).join('');
 }
 
@@ -454,7 +515,7 @@ function renderHardware(rec){
   var typeEl=document.getElementById('hw-type');
   typeEl.style.display='';
   typeEl.innerHTML=esc((h.uma?'统一内存':'独立显存')+' · '+fmt(cap))+
-    (fromTable?'（按型号查表） <a href="#" onclick="jump(\'profile\');return false">不对？改</a>':'');
+    (fromTable?'（按型号查表） <a href="#" data-act="jump" data-jump="profile">不对？改</a>':'');
   var archEl=document.getElementById('hw-arch');
   var arch=(rec.normalized_profile&&rec.normalized_profile.architecture)||'';
   if(arch&&arch!=='unknown'){archEl.textContent='CPU 架构 · '+arch;archEl.style.display='';}
@@ -526,7 +587,7 @@ function renderStatus(rec){
   } else {
     dot.className='dot warn';
     text.innerHTML='共享服务 · 显示的是你自己的硬件档案（来源：'+esc(rec.hardware_source)+'）'+
-      ' · <a href="#" onclick="jump(\'profile\');return false">去检测我的机器</a>';
+      ' · <a href="#" data-act="jump" data-jump="profile">去检测我的机器</a>';
   }
 }
 function renderPick(rec){
@@ -536,7 +597,7 @@ function renderPick(rec){
     if(usable<=0){
       document.getElementById('pick').innerHTML='<div class="warn">还差一个内存档位</div>'+
         '<div class="muted">浏览器无法读取你的内存容量，请选择本机内存：</div>'+
-        '<div style="margin-top:10px">'+[8,16,24,32,36,48,64,96,128].map(function(s){return '<button class="mini" style="margin:2px" onclick="quickRam('+s+')">'+s+' GB</button>';}).join('')+'</div>'+
+        '<div style="margin-top:10px">'+[8,16,24,32,36,48,64,96,128].map(function(s){return '<button class="mini" style="margin:2px" data-act="quickRam" data-ram="'+s+'">'+s+' GB</button>';}).join('')+'</div>'+
         '<div class="muted" style="margin-top:8px">也可以到「硬件档案」粘贴本机探测结果，得到精确结果。</div>';
       return;
     }

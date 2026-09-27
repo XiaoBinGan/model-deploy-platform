@@ -101,35 +101,52 @@ Electron 在开发模式下会打印 `Insecure Content-Security-Policy` 警告�
 渲染进程是唯一直接渲染控制面数据的地方，而控制面按设计是不可信的，
 页面却可以自由地去外部取脚本 / 帧 / object。
 
-**修法**：在 `frontend/index.html` 里加 `Content-Security-Policy` meta：
+**第一次修法**：在 `frontend/index.html` 里加 `Content-Security-Policy` meta，
+但 `script-src` 只能写 `'unsafe-inline'`。
+
+**第二步（最终形态）**：把 `'unsafe-inline'` 也去掉。
 
 ```
-default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
+default-src 'none'; script-src 'nonce-mdp-static-1'; style-src 'unsafe-inline';
 img-src 'self' data:; font-src 'self'; connect-src 'self';
 object-src 'none'; base-uri 'none'; form-action 'none'
 ```
 
-两点必须说清楚，避免把这条写成比实际更强的保护：
+### 怎么去掉 `script-src 'unsafe-inline'` 的
 
-- **`'unsafe-inline'` 去不掉**：这个页面本来就是单文件内联脚本 + 内联事件处理器
-  （`onclick=` / `onchange=`），去掉它整页都不能用。所以 CSP 在这里挡住的是
-  **外部来源**（远程脚本、iframe、object），**不是**注入本身 —— 防注入仍然靠
-  `esc()` 与 `textContent`。
-- **没有写 `frame-ancestors` 和 `sandbox`**：这两个指令通过 `<meta>` 传递时
-  会被忽略，写上去只会让人以为有保护。测试里专门断言它们**不在** CSP 中。
+它之所以去不掉，是因为页面有 **24 处内联事件处理器**（`onclick=` / `onchange=`）。
+全部改成 `data-act` / `data-change` 属性 + 一个挂在 `document` 上的委托监听之后，
+`script-src` 就只剩页面自己那一个极具 `nonce` 的 `<script>` 块。
 
-实测（在真实渲染进程里，不是读字符串）：`fetch('https://example.com')` 被拒，
-同源 `/api/health` 正常，`eval` 被拒（因为脚本源没有 `unsafe-eval`）。
+副作用是好的：`script-src-attr` 会回退到 `script-src`，所以**注入的内联事件处理器
+（例如 `<img onerror=...>`）也会被拒**，不只是 `<script>` 标签。
 
-**往页面里注入脚本的实测结果**（这组数字说明 CSP 到底挡了什么、没挡什么）：
+### 这条 CSP 的真实边界（实测，不是推断）
+
+在真实渲染进程里注入脚本，看浏览器到底拦不拦：
 
 | 注入内容 | 结果 | 触发 |
 |---|---|---|
 | 外部 `<script src="https://example.com/evil.js">` | **被拦** | `script-src-elem` 违规事件 |
-| 内联 `<script>window.__INLINE_OK = true</script>` | **执行了** | 无（`'unsafe-inline'` 放行） |
+| 内联 `<script>window.__INL = true</script>` | **被拦** | `script-src` 违规事件 |
 
-所以这条 CSP 的真实边界是：**挡住外部来源，挡不住内联注入**。
-不要把它当成 XSS 防护 —— 防注入仍然只有 `esc()` / `badge()` / `textContent` 这一层。
+（改成 nonce 之前，第二行的结果是「执行了」。`test-frontend.js` 里那条哨兵测试
+原本断言 `inlineRan === true` 并注明「这是已知边界，不是回归」；去掉 `unsafe-inline`
+之后它按设计变红，于是改成断言新的、更强的行为。）
+
+### 仍然要说清楚的限制
+
+- **static nonce 不是 per-response nonce**。这个文件由桌面端和控制面**原样**送出，
+  没有模板化去生成随机 nonce。它的价值在于「注入的标签猜不到」以及浏览器对
+  `getAttribute('nonce')` 的隐藏；**它不是 XSS 防护的替代品**。
+  防注入仍然只有 `esc()` / `badge()` / `textContent` 这一层。
+- **`style-src 'unsafe-inline'` 保留**：页面有一个内联 `<style>` 块，
+  以及遍布各处的 `style=""` 属性。样式注入的危害远小于脚本注入。
+- **没有写 `frame-ancestors` 和 `sandbox`**：这两个指令通过 `<meta>` 传递时
+  会被忽略，写上去只会让人以为有保护。测试里专门断言它们**不在** CSP 中。
+
+其他实测：`fetch('https://example.com')` 被拒（`connect-src`），
+同源 `/api/health` 正常，`eval` 被拒（脚本源没有 `unsafe-eval`）。
 
 ---
 
@@ -140,7 +157,7 @@ cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 
 cd desktop && node test-trust.js                                          # 15 passed
 ```
 
-前端侧另有 6 条 CSP 断言在 `desktop/test-frontend.js`（真的在渲染进程里验证）。
+前端侧另有 8 条 CSP / 注入断言在 `desktop/test-frontend.js`（真的在渲染进程里验证）。
 
 backend 侧覆盖：默认没有 CORS 中间件、跨源预检拿不到放行头、5 个写操作对远端全部 403、
 `MDP_ALLOW_REMOTE_DEPLOY=1` 仍能放开、读操作对远端保持开放、

@@ -150,10 +150,64 @@ app.whenReady().then(async () => {
   check("CSP 拦下注入的外部脚本（按 violation 事件判定）",
     inject.violations.some((d) => d.indexOf('script-src') >= 0),
     JSON.stringify(inject.violations));
-  // 这条不是「应该通过」，是**记录已知边界**：unsafe-inline 让内联注入照样执行。
-  // 如果哪天有人把内联事件处理器清干净了，这条会变成 false，正好提醒去收紧 CSP。
-  check("记录已知边界：内联注入目前仍会执行（不是回归，是 unsafe-inline 的代价）",
-    inject.inlineRan === true, String(inject.inlineRan));
+  // 这条原本是「记录已知边界：内联注入仍会执行」。清掉全部内联事件处理器之后，
+  // script-src 去掉了 'unsafe-inline' 改用 nonce，哨兵按设计变红 —— 现在改成断言
+  // 新的、更强的行为：注入的内联脚本**也会被执行拒绝**。
+  check("CSP 连注入的内联脚本也拦下（script-src 已改为 nonce）",
+    inject.inlineRan === false, String(inject.inlineRan));
+  check("内联注入被拒时产生 script-src 违规事件",
+    inject.violations.some((d) => d.indexOf('script-src') >= 0),
+    JSON.stringify(inject.violations));
+
+  // --- 事件委托：CSP 去掉 unsafe-inline 之后，所有交互都走 data-act/data-change ---
+  // 这组一定要有：把 click 委托整个关掉时，上面的断言**全都照样通过**（已验证），
+  // 也就是说没有这组测试，委托坏掉了也没人知道。
+  const delegate = await run(`(async () => {
+    const out = {};
+    // 1) data-act + data-ram：quickRam 会把内存档位写进 #pf-ram
+    const qr = document.querySelector('[data-act="quickRam"][data-ram="16"]');
+    out.foundQuickRam = !!qr;
+    document.getElementById('pf-ram').value = '';
+    if (qr) qr.click();
+    out.ram = document.getElementById('pf-ram').value;
+    // 2) data-act="closeModal"
+    openInstallModal('mlx');
+    out.opened = getComputedStyle(document.getElementById('modal')).display !== 'none';
+    const cb = document.querySelector('[data-act="closeModal"]');
+    out.foundClose = !!cb;
+    if (cb) cb.click();
+    out.closed = getComputedStyle(document.getElementById('modal')).display === 'none';
+    // 3) 背景点击只在自己身上才关闭：点对话框内部不能关
+    openInstallModal('mlx');
+    const inner = document.getElementById('m-body');
+    if (inner) inner.click();
+    out.stillOpenAfterInnerClick = getComputedStyle(document.getElementById('modal')).display !== 'none';
+    document.getElementById('modal').click();
+    out.closedByBackdrop = getComputedStyle(document.getElementById('modal')).display === 'none';
+    // 4) data-act="jump" 不应把页面导航走
+    const before = location.href;
+    const jl = document.querySelector('[data-act="jump"]');
+    out.foundJump = !!jl;
+    if (jl) jl.click();
+    out.urlUnchanged = location.href === before;
+    // 5) 静态断言：不应再有任何内联事件处理器（CSP 会拒绝它们）
+    out.inlineHandlers = document.querySelectorAll('[onclick],[onchange]').length;
+    return out;
+  })()`);
+  check("委托的 click 能跑通并读到 data-ram（quickRam -> #pf-ram）",
+    delegate.foundQuickRam === true && delegate.ram === '16',
+    JSON.stringify({ f: delegate.foundQuickRam, ram: delegate.ram }));
+  check("委托的 closeModal 按钮能关掉弹框",
+    delegate.opened === true && delegate.foundClose === true && delegate.closed === true,
+    JSON.stringify(delegate) .slice(0, 90));
+  check("点弹框内部不会误关，点背景才关",
+    delegate.stillOpenAfterInnerClick === true && delegate.closedByBackdrop === true,
+    JSON.stringify({ inner: delegate.stillOpenAfterInnerClick, back: delegate.closedByBackdrop }));
+  check("委托的 jump 链接不会把页面导航走",
+    delegate.foundJump === true && delegate.urlUnchanged === true,
+    JSON.stringify({ f: delegate.foundJump, u: delegate.urlUnchanged }));
+  check("页面里已无任何内联事件处理器（CSP 会拒绝它们）",
+    delegate.inlineHandlers === 0, String(delegate.inlineHandlers));
   // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
   check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
     csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));
@@ -165,12 +219,12 @@ app.whenReady().then(async () => {
     const sel = document.getElementById('d-backend');
     const block = document.getElementById('d-docker');
     const before = block.style.display;
-    sel.value = 'docker'; sel.dispatchEvent(new Event('change'));
+    sel.value = 'docker'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     const shown = block.style.display;
     const warn = document.getElementById('d-docker-warn');
     const warnShown = warn.style.display !== 'none' && warn.textContent.length > 0;
     const warnText = warn.textContent;
-    sel.value = 'ollama'; sel.dispatchEvent(new Event('change'));
+    sel.value = 'ollama'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     const hidden = block.style.display;
     return { before, shown, hidden, warnShown, warnText };
   })()`);
@@ -195,7 +249,7 @@ app.whenReady().then(async () => {
       caps: { platform: 'darwin', docker: true, nvidia: false } };
     fillBackends();
     const b = document.getElementById('d-backend');
-    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    b.value = 'docker'; b.dispatchEvent(new Event('change', { bubbles: true }));
     const g = document.getElementById('d-gpus');
     g.removeAttribute('data-touched');
     updateDockerBlock();
@@ -209,12 +263,18 @@ app.whenReady().then(async () => {
     const kept = g.value;
     g.removeAttribute('data-touched');
     window.CONFIG.caps = { platform: 'darwin', docker: true, nvidia: false };
-    return { mac, linux, kept, hasTouchedAttr: document.getElementById('d-gpus').getAttribute('onchange') !== null };
+    // 记录用户选择的方式变了：内联 onchange 已被 data-change 取代（CSP 不再允许内联处理器）。
+    const gEl = document.getElementById('d-gpus');
+    return { mac, linux, kept,
+      markedByDelegate: gEl.getAttribute('data-change') === 'touched',
+      noInlineHandler: gEl.getAttribute('onchange') === null };
   })()`);
   check("macOS 上 GPU 默认 none（all 在这里必然失败）", gpuDefault.mac === 'none', gpuDefault.mac);
   check("Linux + NVIDIA 上 GPU 默认 all", gpuDefault.linux === 'all', gpuDefault.linux);
   check("用户显式改过之后不再被覆盖", gpuDefault.kept === 'none', gpuDefault.kept);
-  check("GPU 控件带 onchange 以便记录用户的选择", gpuDefault.hasTouchedAttr === true);
+  check("GPU 控件用 data-change 记录用户选择（不再用内联 onchange）",
+    gpuDefault.markedByDelegate === true && gpuDefault.noInlineHandler === true,
+    JSON.stringify({ d: gpuDefault.markedByDelegate, clean: gpuDefault.noInlineHandler }));
 
   // macOS 的警告必须说清楚「默认镜像在这里起不来」，否则用户会照着默认值点下去。
   const macWarnText = await run(`(() => {
@@ -222,7 +282,7 @@ app.whenReady().then(async () => {
       caps: { platform: 'darwin', docker: true, nvidia: false } };
     fillBackends();
     const b = document.getElementById('d-backend');
-    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    b.value = 'docker'; b.dispatchEvent(new Event('change', { bubbles: true }));
     const t = document.getElementById('d-docker-warn').textContent;
     return { t };
   })()`);
@@ -254,7 +314,7 @@ app.whenReady().then(async () => {
     LAST = { client_is_local: false };
     fillBackends();
     const b = document.getElementById('d-backend');
-    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    b.value = 'docker'; b.dispatchEvent(new Event('change', { bubbles: true }));
     updateDockerBlock();
     document.getElementById('d-image').value = 'my/cpu-image:1';
     document.getElementById('d-volumes').value = '/tmp/models:/models:ro';
@@ -380,7 +440,7 @@ app.whenReady().then(async () => {
     window.CONFIG = { backends: ['ollama'], installable: {}, unavailable: {}, local: true, caps: { platform: 'darwin', docker: false, nvidia: false } };
     fillBackends();
     const sel = document.getElementById('d-backend');
-    sel.value = 'docker'; sel.dispatchEvent(new Event('change'));
+    sel.value = 'docker'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     const block = document.getElementById('d-docker');
     const modalOpen = getComputedStyle(document.getElementById('modal')).display !== 'none';
     const selected = sel.value;
@@ -395,7 +455,7 @@ app.whenReady().then(async () => {
     window.CONFIG = { backends: ['docker', 'ollama'], installable: {}, unavailable: {}, local: true, caps: { platform: 'darwin', docker: true, nvidia: false } };
     fillBackends();
     const sel = document.getElementById('d-backend');
-    sel.value = 'docker'; sel.dispatchEvent(new Event('change'));
+    sel.value = 'docker'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('d-image').value = 'vllm/vllm-openai:latest';
     document.getElementById('d-gpus').value = '0,1';
     document.getElementById('d-port').value = '8000';
@@ -469,7 +529,7 @@ app.whenReady().then(async () => {
 
   const nonDocker = await run(`(async () => {
     const sel = document.getElementById('d-backend');
-    sel.value = 'ollama'; sel.dispatchEvent(new Event('change'));
+    sel.value = 'ollama'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('d-port').value = '11434';
     window.__CAP.length = 0;
     await createDeploy();
@@ -511,7 +571,7 @@ app.whenReady().then(async () => {
     ];
     await refreshDeployments();
     const sel = document.getElementById('t-dep');
-    sel.selectedIndex = 1; sel.dispatchEvent(new Event('change'));
+    sel.selectedIndex = 1; sel.dispatchEvent(new Event('change', { bubbles: true }));
     const picked = sel.value;
     const modelAfterPick = document.getElementById('t-model').value;
     await refreshDeployments();
@@ -523,7 +583,7 @@ app.whenReady().then(async () => {
 
   // --- F-10: invalid port / max tokens blocked before submit ---------------
   const port0 = await run(`(async () => {
-    const sel = document.getElementById('d-backend'); sel.value = 'docker'; sel.dispatchEvent(new Event('change'));
+    const sel = document.getElementById('d-backend'); sel.value = 'docker'; sel.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('d-port').value = '0';
     window.__CAP.length = 0;
     await createDeploy();
