@@ -150,7 +150,8 @@ details.card[open]>summary{margin-bottom:12px}
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option></select></div>
     <div class="field"><label for="d-port">端口</label><input id="d-port" type="number" min="1024" max="65535" step="1" value="11434"></div>
-    <div class="field wide"><label for="d-path">模型路径 / Ollama 标签</label><input id="d-path" value="qwen3:8b"></div>
+    <div class="field wide"><label for="d-path">模型路径 / Ollama 标签</label><input id="d-path" data-change="manualPath" value="qwen3:8b"></div>
+<div class="advisory" id="d-origin" style="display:none"></div>
     <div class="field wide"><label for="d-name">模型名（OpenAI 请求用）</label><input id="d-name" value="qwen3:8b"></div>
     <div class="field wide" id="d-docker" style="display:none">
       <div class="form">
@@ -256,6 +257,13 @@ function copyText(text){
   var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
 }
 var LAST=null, DEPLOYMENTS=[], CONFIG={}, PROFILE={source:'browser',platform:'unknown',architecture:'',cpu_cores:null,ram_gb:null,gpus:[]}, GPU_TABLE=null;
+// #d-path 当前的值是不是「从控制面目录自动填的」。用户一旦自己改过就置 false，
+// 提示随之消失 —— 提示必须只在它说的那件事为真的时候出现。
+//
+// 这里原本还有一个 PATH_EDITED，总是和它一起被设置，于是两者恒等价，是个从不
+// 独立表达任何东西的变量（变异测试 B 暴露的：去掉其中一个判断，测试照样全绿）。
+// 只保留「值从哪来」这一个事实。
+var PATH_FROM_CATALOG=false;
 
 // Every interaction goes through delegation instead of inline onclick/onchange
 // attributes. That is not a style preference: the CSP dropped script-src
@@ -302,6 +310,10 @@ document.addEventListener('change',function(ev){
   if(name==='refresh'){refresh();}
   else if(name==='syncDeploy'){syncDeploy();}
   else if(name==='touched'){el.setAttribute('data-touched','1');}
+  else if(name==='manualPath'){
+    // 用户自己动过这个框，它就不再是「目录自动填的」了。
+    PATH_FROM_CATALOG=false; renderOriginHint();
+  }
 });
 
 function detectGPUName(){
@@ -644,6 +656,7 @@ function fillDeployModels(rec){
   sel.innerHTML=rows.map(function(r,i){
     return '<option value="'+i+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
   }).join('');
+  PATH_FROM_CATALOG=true;
   syncDeploy();
 }
 // Both backend dropdowns were hardcoded to the full list, so an unavailable
@@ -878,6 +891,41 @@ function currentModel(){
   if(sel.value===''){return null;}
   return DEPLOY_MODELS[+sel.value]||null;
 }
+// ollama 只在第一段含 "." 或 ":" 时才把它当 registry host；否则第一段是
+// namespace（qwen/qwen3 走官方 registry）。所以判定要按这个规则来，
+// 否则会把普通的 namespace 全报成第三方来源。
+var KNOWN_REGISTRIES=['hf.co','registry.ollama.ai'];
+function ollamaRegistry(tag){
+  var s=String(tag||'');
+  // 没有 "/" 就没有 registry 段：qwen3:8b 里那个冒号是 **tag 分隔符**，
+  // 不是端口。少了这一句，每个正常模型都会被报成第三方 registry。
+  if(s.indexOf('/')<0){return '';}
+  var first=s.split('/')[0];
+  if(first.indexOf('.')<0&&first.indexOf(':')<0){return '';}
+  return first;
+}
+
+// 部署表单里最容易被忽略的一点：#d-path 是自动填的，而下拉框显示的是模型
+// 显示名 —— 两个不同的字段。这个提示把「将按哪个值执行、它从哪来」说出来。
+function renderOriginHint(){
+  var el=document.getElementById('d-origin');
+  if(!el){return;}
+  if(!PATH_FROM_CATALOG){el.style.display='none';el.textContent='';return;}
+  var backend=document.getElementById('d-backend').value;
+  var val=document.getElementById('d-path').value;
+  var msg='这一项自动填自控制面目录，不是你填的；启动时会照这个值执行。';
+  var cls='advisory';
+  if(backend==='ollama'){
+    var reg=ollamaRegistry(val);
+    if(reg&&KNOWN_REGISTRIES.indexOf(reg)<0){
+      msg='这个标签来自控制面目录，将从第三方 registry「'+esc(reg)+'」拉取模型权重。确认是你认识的主机再启动。';
+    }
+  }
+  el.style.display='block';
+  el.className=cls;
+  el.innerHTML=msg;
+}
+
 function syncDeploy(){
   updateDockerBlock();
   var m=currentModel(); if(!m) return;
@@ -890,6 +938,9 @@ function syncDeploy(){
     document.getElementById('d-path').value=m.path||m.id;
     document.getElementById('d-name').value=m.id;
   }
+  // 刚被目录覆盖，所以又变回「自动填的」状态。
+  PATH_FROM_CATALOG=true;
+  renderOriginHint();
   refreshAdvisory();
 }
 async function refreshAdvisory(){

@@ -246,6 +246,65 @@ app.whenReady().then(async () => {
   check("拒绝原因里的 HTML 被转义（它同样来自不可信来源）",
     rejectedUI.escaped === true,
     JSON.stringify({ noEl: rejectedUI.noInjectedElement, literal: rejectedUI.literalInText }));
+
+  // --- DESK-27: 把「将按哪个值执行、它从哪来」说出来 -------------------------
+  // 下拉框显示的是模型显示名，实际执行的却是 source.ollama / source.huggingface。
+  // 用户批准一个字符串、机器跑另一个，所以表单必须点明这件事。
+  const origin = await run(`(async () => {
+    const el = document.getElementById('d-origin');
+    const pathEl = document.getElementById('d-path');
+    const out = {};
+    const rec = (ollama) => ({ recommendations: [
+      { id: 'qwen3-8b', name: 'Qwen3 8B', quantization: 'Q4_K_M', fits: true,
+        reason_key: 'ok', recommended: true, source: { ollama } },
+    ] });
+    // 1) 目录填的普通标签：提示出现，但不报第三方 registry
+    fillDeployModels(rec('qwen3:8b'));
+    document.getElementById('d-backend').value = 'ollama';
+    syncDeploy();
+    out.plainShown = getComputedStyle(el).display !== 'none';
+    out.plainText = el.textContent;
+    out.plainMentionsRegistry = /registry|拉取/.test(out.plainText);
+    // 1b) tag 里的冒号不是 registry 端口（这里曾经误报成 registry「qwen3:8b」）
+    out.plainBadRegistry = /第三方/.test(out.plainText);
+    // 2) namespace 不是 registry：qwen/qwen3 必须**不**触发第三方告警
+    fillDeployModels(rec('qwen/qwen3:8b'));
+    document.getElementById('d-backend').value = 'ollama';
+    syncDeploy();
+    out.namespaceWarned = /第三方/.test(el.textContent);
+    // 3) 真正的第三方 registry：必须点名主机
+    fillDeployModels(rec('evil-registry.example.com/backdoor:latest'));
+    document.getElementById('d-backend').value = 'ollama';
+    syncDeploy();
+    out.evilWarned = /第三方/.test(el.textContent);
+    out.evilNamesHost = el.textContent.indexOf('evil-registry.example.com') >= 0;
+    // 4) hf.co 是已知 registry，不该被报成第三方
+    fillDeployModels(rec('hf.co/user/repo:Q4_K_M'));
+    document.getElementById('d-backend').value = 'ollama';
+    syncDeploy();
+    out.hfWarned = /第三方/.test(el.textContent);
+    // 5) 用户自己改过就不该再说是「自动填的」
+    fillDeployModels(rec('qwen3:8b'));
+    document.getElementById('d-backend').value = 'ollama';
+    syncDeploy();
+    pathEl.value = 'my:own-tag';
+    pathEl.dispatchEvent(new Event('change', { bubbles: true }));
+    out.hiddenAfterEdit = getComputedStyle(el).display === 'none';
+    return out;
+  })()`);
+  check("DESK-27 目录自动填时给出提示", origin.plainShown === true, origin.plainText);
+  check("DESK-27 提示说明这个值不是你填的",
+    origin.plainText.indexOf('不是你填的') >= 0, origin.plainText);
+  check("DESK-27 普通 tag 的冒号不被当成 registry（qwen3:8b）",
+    origin.plainBadRegistry === false, origin.plainText);
+  check("DESK-27 namespace 不被误报成第三方 registry（qwen/qwen3）",
+    origin.namespaceWarned === false, String(origin.namespaceWarned));
+  check("DESK-27 已知 registry hf.co 不被误报",
+    origin.hfWarned === false, String(origin.hfWarned));
+  check("DESK-27 第三方 registry 被点名",
+    origin.evilWarned === true && origin.evilNamesHost === true,
+    JSON.stringify({ w: origin.evilWarned, h: origin.evilNamesHost }));
+  check("DESK-27 用户自己改过之后提示消失", origin.hiddenAfterEdit === true);
   // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
   check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
     csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));
