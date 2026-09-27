@@ -661,13 +661,20 @@ app.whenReady().then(async () => {
     if (!post) return null;
     const parsed = JSON.parse(post.body);
     parsed.__url = post.url;
+    parsed.__hasToken = !!window.API_TOKEN;
     return parsed;
   } catch (e) { return { __error: String((e && e.stack) || e) }; } })()`);
   if (dockerBody && dockerBody.__error) console.log("  [debug] dockerBody: " + dockerBody.__error);
-  // 写操作要带 token（DESK-29）；没有它服务端会 403，功能直接坏掉。
-  check("DESK-29 创建部署的请求带上了 token",
-    !!dockerBody && String(dockerBody.__url || '').indexOf('token=') >= 0,
-    dockerBody && dockerBody.__url);
+  // 写操作要带 token（DESK-29）；没有它桌面端会 403，功能直接坏掉。
+  // 页面由控制面提供时 API_TOKEN 是空串（没有本机 API 要保护），那时**不该**带。
+  // 两种模式都要断言，否则这条测试只是在验证其中一个部署方式。
+  const hadTok = !!dockerBody && dockerBody.__hasToken;
+  const sentTok = !!dockerBody && String(dockerBody.__url || '').indexOf('token=') >= 0;
+  check(hadTok
+      ? "DESK-29 桌面端页面：写操作请求带上了 token"
+      : "DESK-29 控制面页面：没有 token，因此不带 token 参数",
+    !!dockerBody && hadTok === sentTok,
+    JSON.stringify({ hasToken: hadTok, sentToken: sentTok, url: dockerBody && dockerBody.__url }));
   check("docker 请求体 image 正确", dockerBody && dockerBody.image === "vllm/vllm-openai:latest", dockerBody && dockerBody.image);
   check("docker 请求体 gpus 正确", dockerBody && dockerBody.gpus === "0,1", dockerBody && dockerBody.gpus);
   check("docker 请求体 volumes 解析正确（空格路径 + ro + 空行）",
