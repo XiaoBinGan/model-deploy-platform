@@ -258,6 +258,16 @@ function copyText(text){
   var ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
 }
 var LAST=null, DEPLOYMENTS=[], CONFIG={}, PROFILE={source:'browser',platform:'unknown',architecture:'',cpu_cores:null,ram_gb:null,gpus:[]}, GPU_TABLE=null;
+// 所有会改变本机状态的请求都要带这个 token（DESK-29）。它由桌面端在启动时随机
+// 生成，只出现在桌面端自己渲染的页面里 —— 别的网站上的页面拿不到它。
+// <img src="/api/backends/x/install"> 这种请求连 Origin 头都没有，所以只查
+// Origin 挡不住它；token 才是它伪造不出来的东西。
+// 页面由控制面提供时（根本不涉及本机桌面服务）它是空串。
+var API_TOKEN='{{API_TOKEN}}';
+function withToken(u){
+  if(!API_TOKEN){return u;}
+  return u+(u.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(API_TOKEN);
+}
 // #d-path 当前的值是不是「从控制面目录自动填的」。用户一旦自己改过就置 false，
 // 提示随之消失 —— 提示必须只在它说的那件事为真的时候出现。
 //
@@ -856,7 +866,7 @@ function runInstall(b){
   var append=function(line){log.textContent+=(log.textContent?'\n':'')+line;log.scrollTop=log.scrollHeight;};
   var finish=function(html){if(INSTALL_ES){INSTALL_ES.close();INSTALL_ES=null;}actions.innerHTML=html;};
   if(INSTALL_ES){INSTALL_ES.close();}
-  INSTALL_ES=new EventSource('/api/backends/'+encodeURIComponent(b)+'/install');
+  INSTALL_ES=new EventSource(withToken('/api/backends/'+encodeURIComponent(b)+'/install'));
   INSTALL_ES.onmessage=function(ev){
     var m;try{m=JSON.parse(ev.data);}catch(e){return;}
     if(m.type==='plan'){append('开始安装 '+b+'，共 '+(m.steps||[]).length+' 步');}
@@ -1123,14 +1133,14 @@ function onTestDepChange(keepModel){
 function depLogs(id){var d=DEPLOYMENTS.filter(function(x){return x.id===id;})[0];document.getElementById('d-log').textContent=(d&&d.log&&d.log.length)?d.log.join('\n'):'（无日志）';}
 async function depStart(id){
   try{
-    var r=await fetch('/api/deployments/'+id+'/start',{method:'POST'});
+    var r=await fetch(withToken('/api/deployments/'+id+'/start'),{method:'POST'});
     if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='启动失败：'+(d.detail||r.status);}
   }catch(e){document.getElementById('d-log').textContent='启动失败：'+(e&&e.message||e);}
   refreshDeployments();
 }
 async function depStop(id){
   try{
-    var r=await fetch('/api/deployments/'+id+'/stop',{method:'POST'});
+    var r=await fetch(withToken('/api/deployments/'+id+'/stop'),{method:'POST'});
     if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='停止失败：'+(d.detail||r.status);}
   }catch(e){document.getElementById('d-log').textContent='停止失败：'+(e&&e.message||e);}
   refreshDeployments();
@@ -1138,7 +1148,7 @@ async function depStop(id){
 async function depDelete(id){
   if(!confirm('删除部署 '+id+'？正在运行的会先停止。')){return;}
   try{
-    var r=await fetch('/api/deployments/'+id,{method:'DELETE'});
+    var r=await fetch(withToken('/api/deployments/'+id),{method:'DELETE'});
     if(!r.ok){var d=await r.json().catch(function(){return {};});document.getElementById('d-log').textContent='删除失败：'+(d.detail||r.status);return;}
     document.getElementById('d-log').textContent='已删除 '+id;
   }catch(e){document.getElementById('d-log').textContent='删除失败：'+e;}
@@ -1182,11 +1192,11 @@ async function createDeploy(){
     body.extra_args=df.extra_args;
   }
   try{
-    var r=await fetch('/api/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    var r=await fetch(withToken('/api/deployments'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     var d=await r.json();
     if(!r.ok){log.textContent='被拒绝：'+(d.detail||r.status);return;}
     log.textContent='已创建 '+d.id+'，正在启动…';
-    await fetch('/api/deployments/'+d.id+'/start',{method:'POST'});
+    await fetch(withToken('/api/deployments/'+d.id+'/start'),{method:'POST'});
     await refreshDeployments();
     depLogs(d.id);
   }catch(e){log.textContent='创建失败：'+e;}
@@ -1198,7 +1208,7 @@ async function runTest(){
   if(!validMaxTokens(maxTokens)){document.getElementById('t-out').textContent='最大 Token 必须是 1~1048576 的整数。';return;}
   document.getElementById('t-out').textContent='请求中…';
   try{
-    var r=await (await fetch('/api/deployments/'+id+'/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+    var r=await (await fetch(withToken('/api/deployments/'+id+'/test'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
       message:document.getElementById('t-msg').value,model_name:document.getElementById('t-model').value,max_tokens:+document.getElementById('t-max').value})})).json();
     if(r.ok){document.getElementById('t-out').innerHTML='<span class="ok">'+esc(r.status_code)+' '+esc(r.url)+'</span>'+(r.reply_source==='reasoning'?'<span class="warn"> · 来自思考内容</span>':'')+'<div class="reply">'+esc(r.reply)+'</div>'+(r.hint?'<div class="warn">'+esc(r.hint)+'</div>':'')+'<div class="muted">'+esc(JSON.stringify(r.usage))+'</div>';}
     else{document.getElementById('t-out').innerHTML='<span class="bad">失败</span> '+esc(r.error||r.status_code);}

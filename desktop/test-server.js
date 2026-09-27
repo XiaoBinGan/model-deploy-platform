@@ -52,6 +52,12 @@ function startUpstream() {
 
 // Raw request so the exact request line (including "..") reaches the server;
 // fetch would normalize it away before sending.
+// 写操作要带 token（DESK-29）。
+let TOKEN = "";
+function withToken(url) {
+  return url + (url.indexOf("?") < 0 ? "?" : "&") + "token=" + encodeURIComponent(TOKEN);
+}
+
 function rawRequest(port, rawPath, method) {
   return new Promise((resolve) => {
     const req = http.request(
@@ -93,6 +99,11 @@ function rawRequest(port, rawPath, method) {
   }));
   const s = await start(0, { dataDir });
   const base = s.url;
+  // 写操作要带 token（DESK-29）。像浏览器那样从服务端渲染的页面里取，
+  // 顺便也验证了注入确实发生。
+  const html0 = await (await fetch(base)).text();
+  const tmatch = /API_TOKEN='([^']*)'/.exec(html0);
+  TOKEN = tmatch ? tmatch[1] : "";
   console.log("desktop server:", base, "| upstream:", process.env.MDP_SERVICE);
 
   // --- DESK-25: readBody size cap -----------------------------------------
@@ -157,7 +168,7 @@ function rawRequest(port, rawPath, method) {
   check("PUT /api/deployments -> 405", mDeploys.status === 405, "status=" + mDeploys.status);
 
   // An existing deployment is needed to check method checks on its actions.
-  const created = await (await fetch(base + "api/deployments", {
+  const created = await (await fetch(withToken(base + "api/deployments"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ backend: "ollama", model_name: "test-model", model_id: "test-model" }),
@@ -171,7 +182,7 @@ function rawRequest(port, rawPath, method) {
     check("GET on a POST-only action -> 405", mAction.status === 405, "status=" + mAction.status);
     const mItem = await fetch(base + "api/deployments/" + depId, { method: "PUT" });
     check("PUT on a GET/DELETE resource -> 405", mItem.status === 405, "status=" + mItem.status);
-    await fetch(base + "api/deployments/" + depId, { method: "DELETE" });
+    await fetch(withToken(base + "api/deployments/" + depId), { method: "DELETE" });
   }
 
   // --- DESK-10: upstream timeout -------------------------------------------
@@ -334,6 +345,88 @@ function rawRequest(port, rawPath, method) {
   check("DESK-26 被丢弃的行不在正常部署列表里",
     !(deps.deployments || []).some((d) => d.id === "dep_bad"),
     JSON.stringify((deps.deployments || []).map((d) => d.id)));
+
+  // --- DESK-29: 本地服务不能被别的页面驱动 --------------------------------
+  // loopback 绑定的只挡住了别的机器，挡不住别的页面：用户访问的任何网站都能
+  // 往这里发请求，而装机端点是 GET，<img> 就能打。CORS 只管读响应不管发请求。
+  function raw(port, path, method, headers, body) {
+    return new Promise((resolve) => {
+      const req = http.request(
+        { host: "127.0.0.1", port: port, path: path, method: method, headers: headers || {} },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }));
+        },
+      );
+      req.on("error", () => resolve({ status: 0, body: "" }));
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+  const P = s.port;
+  const J = JSON.stringify({ backend: "ollama", model_name: "csrf", model_id: "csrf" });
+  const hostHdr = { host: "127.0.0.1:" + P };
+
+  // <img src="/api/backends/x/install"> 是 no-cors，**不带 Origin 头**。
+  // 这就是为什么只查 Origin 不够，必须有 token。
+  const imgInstall = await raw(P, "/api/backends/ollama/install", "GET", hostHdr);
+  check("DESK-29 <img> 式装机请求（无 Origin，无 token）被 token 层拒绝",
+    imgInstall.status === 403 && imgInstall.body.indexOf("token") >= 0, imgInstall.body);
+
+  const okInstall = await raw(P,
+    "/api/backends/nonexistent/install?token=" + encodeURIComponent(TOKEN), "GET", hostHdr);
+  check("DESK-29 带 token 的装机请求不被拦（功能没被关掉）",
+    okInstall.status === 200, "status=" + okInstall.status);
+
+  const xo = await raw(P, "/api/deployments", "POST", Object.assign({
+    origin: "https://evil.example",
+    "content-type": "text/plain",
+    "content-length": Buffer.byteLength(J),
+  }, hostHdr), J);
+  // 断言必须钉住「哪一层拒的」：token 层也会返回 403，只看状态码的话
+  // Origin 闸门整个删掉测试也照样全绿。
+  check("DESK-29 跨源 POST 被来源闸门拒绝（不是被 token 挡的）",
+    xo.status === 403 && xo.body.indexOf("cross-origin") >= 0, xo.body);
+
+  // DNS rebinding：页面在 evil.example，解析到 127.0.0.1，于是请求真的来自
+  // 回环地址，但 Host 头还是 evil.example。
+  const rebind = await raw(P, "/api/deployments", "POST", {
+    host: "evil.example:" + P,
+    "content-type": "text/plain",
+    "content-length": Buffer.byteLength(J),
+  }, J);
+  check("DESK-29 DNS rebinding 被 Host 检查拒绝（不是被 token 挡的）",
+    rebind.status === 403 && rebind.body.indexOf("cross-origin") >= 0, rebind.body);
+
+  const noToken = await raw(P, "/api/deployments", "POST", Object.assign({
+    origin: "http://127.0.0.1:" + P,
+    "content-type": "text/plain",
+    "content-length": Buffer.byteLength(J),
+  }, hostHdr), J);
+  check("DESK-29 同源但缺 token 被 token 层拒绝",
+    noToken.status === 403 && noToken.body.indexOf("token") >= 0, noToken.body);
+
+  const withTok = await raw(P, "/api/deployments?token=" + encodeURIComponent(TOKEN), "POST",
+    Object.assign({
+      origin: "http://127.0.0.1:" + P,
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(J),
+    }, hostHdr), J);
+  check("DESK-29 同源 + token 放行", withTok.status === 200, "status=" + withTok.status);
+
+  const pageHtml = await (await fetch(base)).text();
+  check("DESK-29 页面里注入的是真实 token",
+    TOKEN.length > 20 && pageHtml.indexOf(TOKEN) >= 0, "len=" + TOKEN.length);
+  check("DESK-29 页面里不残留 token 占位符",
+    pageHtml.indexOf("{{API_TOKEN}}") < 0);
+  // token 是每进程一个（不是每响应一个）：页面刷新后旧的 token 不该失效。
+  const pageAgain = await (await fetch(base)).text();
+  check("DESK-29 token 每进程固定，不随响应变化",
+    /API_TOKEN='([^']*)'/.exec(pageAgain)[1] === TOKEN);
 
   await s.close();
   upstream.server.closeAllConnections();

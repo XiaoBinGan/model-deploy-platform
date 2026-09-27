@@ -38,15 +38,17 @@ const INSTALL = `(() => {
   window.fetch = function (url, opts) {
     opts = opts || {};
     const u = String(url);
+    // 匹配只看路径：写操作现在会带 ?token=...（DESK-29）。
+    const p = u.split('?')[0];
     const method = (opts.method || 'GET').toUpperCase();
-    window.__CAP.push({ url: u, method: method, body: opts.body || null });
-    if (u === '/api/deployments' && method === 'GET') return json({ deployments: window.__DEPS, rejected: window.__REJECTED || [] });
-    if (u === '/api/deployments' && method === 'POST') return json({ id: 'dep_new' });
-    if (u.indexOf('/api/deployments/') === 0) return json({});
-    if (u === '/api/models/recommend') return json(window.__REC || {});
-    if (u === '/api/environment/latest') return json({});
-    if (u === '/api/backends') return json(window.__CONFIG || {});
-    if (u === '/api/hardware/resolve') return json({ budget: {}, normalized: {} });
+    window.__CAP.push({ url: u, path: p, method: method, body: opts.body || null });
+    if (p === '/api/deployments' && method === 'GET') return json({ deployments: window.__DEPS, rejected: window.__REJECTED || [] });
+    if (p === '/api/deployments' && method === 'POST') return json({ id: 'dep_new' });
+    if (p.indexOf('/api/deployments/') === 0) return json({});
+    if (p === '/api/models/recommend') return json(window.__REC || {});
+    if (p === '/api/environment/latest') return json({});
+    if (p === '/api/backends') return json(window.__CONFIG || {});
+    if (p === '/api/hardware/resolve') return json({ budget: {}, normalized: {} });
     return json({});
   };
   window.__stubFetch = window.fetch;
@@ -655,10 +657,17 @@ app.whenReady().then(async () => {
     document.getElementById('d-extra').value = ['--max-model-len', '65536', '', '--served-model-name My Model', ''].join(String.fromCharCode(10));
     window.__CAP.length = 0;
     await createDeploy();
-    const post = window.__CAP.filter((c) => c.url === '/api/deployments' && c.method === 'POST')[0];
-    return post ? JSON.parse(post.body) : null;
+    const post = window.__CAP.filter((c) => c.path === '/api/deployments' && c.method === 'POST')[0];
+    if (!post) return null;
+    const parsed = JSON.parse(post.body);
+    parsed.__url = post.url;
+    return parsed;
   } catch (e) { return { __error: String((e && e.stack) || e) }; } })()`);
   if (dockerBody && dockerBody.__error) console.log("  [debug] dockerBody: " + dockerBody.__error);
+  // 写操作要带 token（DESK-29）；没有它服务端会 403，功能直接坏掉。
+  check("DESK-29 创建部署的请求带上了 token",
+    !!dockerBody && String(dockerBody.__url || '').indexOf('token=') >= 0,
+    dockerBody && dockerBody.__url);
   check("docker 请求体 image 正确", dockerBody && dockerBody.image === "vllm/vllm-openai:latest", dockerBody && dockerBody.image);
   check("docker 请求体 gpus 正确", dockerBody && dockerBody.gpus === "0,1", dockerBody && dockerBody.gpus);
   check("docker 请求体 volumes 解析正确（空格路径 + ro + 空行）",
@@ -675,7 +684,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-image').value = 'evil; rm -rf /';
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST'),
       log: document.getElementById('d-log').textContent };
   })()`);
   check("非法镜像名提交前被拦", badImage.posted === false && badImage.log.indexOf('镜像') >= 0, badImage.log.slice(0, 40));
@@ -685,7 +694,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-volumes').value = Array.from({ length: 9 }, (_, i) => '/h' + i + ':/c' + i).join(String.fromCharCode(10));
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST'),
       log: document.getElementById('d-log').textContent };
   })()`);
   check("数据卷超过 8 条提交前被拦", tooManyVols.posted === false && tooManyVols.log.indexOf('8 条') >= 0, tooManyVols.log.slice(0, 40));
@@ -695,7 +704,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-extra').value = Array.from({ length: 33 }, (_, i) => '--a' + i).join(String.fromCharCode(10));
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST'),
       log: document.getElementById('d-log').textContent };
   })()`);
   check("额外参数超过 32 项提交前被拦", tooManyArgs.posted === false && tooManyArgs.log.indexOf('32 项') >= 0, tooManyArgs.log.slice(0, 40));
@@ -705,7 +714,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-volumes').value = 'relative:/x';
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST'),
       log: document.getElementById('d-log').textContent };
   })()`);
   check("数据卷非绝对路径提交前被拦", nonAbsVol.posted === false && nonAbsVol.log.indexOf('绝对路径') >= 0, nonAbsVol.log.slice(0, 40));
@@ -714,7 +723,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-volumes').value = '';
     window.__CAP.length = 0;
     await createDeploy();
-    return window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST');
+    return window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST');
   })()`);
   check("清理掉非法值之后又能提交（拦截没有卡死表单）", goodAgain === true);
 
@@ -724,7 +733,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-port').value = '11434';
     window.__CAP.length = 0;
     await createDeploy();
-    const post = window.__CAP.filter((c) => c.url === '/api/deployments' && c.method === 'POST')[0];
+    const post = window.__CAP.filter((c) => c.path === '/api/deployments' && c.method === 'POST')[0];
     return post ? JSON.parse(post.body) : null;
   })()`);
   check("非 docker 后端不塞 docker 字段",
@@ -778,7 +787,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-port').value = '0';
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'), log: document.getElementById('d-log').textContent };
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST'), log: document.getElementById('d-log').textContent };
   })()`);
   check("端口 0 提交前被拦", port0.posted === false && port0.log.indexOf("端口") >= 0, port0.log.slice(0, 40));
 
@@ -786,7 +795,7 @@ app.whenReady().then(async () => {
     document.getElementById('d-port').value = 'abc';
     window.__CAP.length = 0;
     await createDeploy();
-    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST') };
+    return { posted: window.__CAP.some((c) => c.path === '/api/deployments' && c.method === 'POST') };
   })()`);
   check("非数字端口提交前被拦", portNaN.posted === false);
 

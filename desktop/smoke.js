@@ -12,13 +12,26 @@ function check(name, ok, detail) {
   if (!ok) failures += 1;
 }
 
+// 写操作要带 token（DESK-29）。像浏览器那样从服务端渲染的页面里取，
+// 顺便也验证了注入确实发生。
+let TOKEN = "";
+async function loadToken(base) {
+  const html = await (await fetch(base)).text();
+  const m = /API_TOKEN='([^']*)'/.exec(html);
+  TOKEN = m ? m[1] : "";
+  return TOKEN;
+}
+function withToken(url) {
+  return url + (url.indexOf("?") < 0 ? "?" : "&") + "token=" + encodeURIComponent(TOKEN);
+}
+
 async function getJson(url) {
   const r = await fetch(url);
   return { status: r.status, body: await r.json().catch(() => null) };
 }
 
 async function postJson(url, body) {
-  const r = await fetch(url, {
+  const r = await fetch(withToken(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body || {}),
@@ -39,6 +52,7 @@ async function waitSettled(base, id, seconds) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-smoke-"));
   const s = await start(0, { dataDir });
   const base = s.url;
+  await loadToken(base);
   console.log("local control plane:", base, "| data:", dataDir);
 
   const health = await getJson(base + "api/health");
@@ -131,7 +145,7 @@ async function waitSettled(base, id, seconds) {
   check("deployments persisted", (list.deployments || []).length === 1, (list.deployments || []).length + " item(s)");
 
   // --- deletion: the list used to grow forever with no way to remove anything ---
-  const delRes = await fetch(base + "api/deployments/" + bad.id, { method: "DELETE" });
+  const delRes = await fetch(withToken(base + "api/deployments/" + bad.id), { method: "DELETE" });
   const delBody = await delRes.json().catch(() => null);
   const after = (await getJson(base + "api/deployments")).body || {};
   check("delete removes the deployment",
@@ -139,7 +153,7 @@ async function waitSettled(base, id, seconds) {
       (after.deployments || []).length === 0,
     "status=" + delRes.status + " remaining=" + (after.deployments || []).length);
 
-  const delMissing = await fetch(base + "api/deployments/dep_does_not_exist", { method: "DELETE" });
+  const delMissing = await fetch(withToken(base + "api/deployments/dep_does_not_exist"), { method: "DELETE" });
   check("deleting an unknown deployment fails cleanly",
     delMissing.status >= 400 && delMissing.status < 500, "status=" + delMissing.status);
 

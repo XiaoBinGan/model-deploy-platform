@@ -324,18 +324,80 @@ client_is_local: false
 
 ---
 
+### DESK-29 · 桌面端本地服务没有来源校验（已修）
+
+前面所有的讨论都假设「不可信的是控制面」。这一条换了个方向：**不可信的是用户
+正在访问的任何网页**，而桌面端在 127.0.0.1 上开了一个能装软件、能起容器的服务。
+
+绑定到回环地址挡住了别的**机器**，挡不住别的**页面**。实测（真实攻击者站点
+`http://127.0.0.1:9999`，无 CSP）：
+
+- 跨源 `POST /api/deployments`（`content-type: text/plain`）**创建成功**。
+  `fetch` 抛 `Failed to fetch` 只是 CORS 不让读响应，请求早就落地了。
+- 而 `content-type: application/json` 的同样请求**没有**落地 —— 它触发了预检，
+  而服务端没有 OPTIONS 处理，返回 405。**这是碰巧的保护，不是设计。**
+
+为什么 `jsonBody` 从来不检查 content-type，这一点很关键：
+
+```js
+async function jsonBody(req) {
+  const raw = await readBody(req);   // 不看 content-type，直接 JSON.parse
+```
+
+所以 `text/plain` 这个「简单请求」就绕过了预检，而 `text/plain` 正是 CORS 允许
+免预检的三种 content-type 之一。
+
+更危险的是**装机端点是个 GET**：
+
+```
+GET /api/backends/<name>/install
+```
+
+任何网站都能用 `<img src="http://127.0.0.1:<port>/api/backends/x/install">` 触发它。
+**`<img>` 是 no-cors 请求，根本不带 `Origin` 头** —— 所以只查 Origin 是看不见它的。
+（端口每次启动随机，这是唯一的额外阻力，但它是实现细节，不是安全措施。）
+
+修法是三层，各自独立：
+
+| 层 | 挡什么 |
+|---|---|
+| `Host` 必须是本机回环 authority | DNS rebinding —— 页面在 evil.example、解析到 127.0.0.1，请求确实从回环来，但 Host 还是 evil.example |
+| 有 `Origin` 时必须匹配 | 跨源 fetch/XHR（浏览器对跨源 POST 一定发 Origin） |
+| 写操作必须带每进程随机 token | `<img>` 这类连 Origin 都没有的请求 —— token 是它唯一伪造不出来的东西 |
+
+token 用和 CSP nonce 一样的机制注入：页面里放 `{{API_TOKEN}}` 占位符，桌面端在
+每次响应时替换。装机动作用 `?token=`（`EventSource` 不能加自定义头），其余写操作
+同样走查询串，机制统一。控制面没有本机 API 要保护，它把占位符替换成空串 ——
+**占位符绝不能原样送到浏览器**，两个服务都对此做了检查并在异常时 500。
+
+实测修复后：同一个攻击者站点，跨源 POST 不再落地，`<img>` 装机返回 403，
+`llama-server` 没有被装上。
+
+#### 这一轮的测试教训：403 不足以说明是谁拒的
+
+第一版断言只检查 `status === 403`。变异测试里「删掉来源闸门」和「删掉 Host 检查」
+**都被应用了却仍然全绿** —— 因为 token 层也在返回 403，把两层都遮住了。
+也就是说那两条测试当时并没有在测它们自称测的东西。
+
+改成断言响应里的**理由**（`cross-origin request refused` vs `缺少或错误的本地 API token`）
+之后：删掉来源闸门 → 2 failed；删掉 Host 检查 → 1 failed。
+
+**只看状态码的断言，在有多层拒绝逻辑时是没有分辨力的。**
+
+---
+
 ## 测试
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 passed
 cd backend && .venv/bin/python -m pytest tests/test_frontend_nonce.py -q   # 5 passed
 cd desktop && node test-trust.js                                          # 31 passed（含 16 条 DESK-26）
-cd desktop && node test-server.js                                         # 85 passed（含 5 条 nonce + 4 条 DESK-26 出口断言）
+cd desktop && node test-server.js                                         # 94 passed（含 5 条 nonce + 4 条 DESK-26 出口 + 9 条 DESK-29）
 ```
 
 前端侧另有 8 条 CSP / 注入断言、5 条 DESK-26 出口断言、7 条 DESK-27 提示断言、
-9 条 DESK-28 本地拼命令断言（共 102 条）在 `desktop/test-frontend.js`
-（真的在渲染进程里验证）。
+9 条 DESK-28 本地拼命令断言、1 条 DESK-29 token 断言（共 103 条）在
+`desktop/test-frontend.js`（真的在渲染进程里验证）。
 
 backend 侧覆盖：默认没有 CORS 中间件、跨源预检拿不到放行头、5 个写操作对远端全部 403、
 `MDP_ALLOW_REMOTE_DEPLOY=1` 仍能放开、读操作对远端保持开放、

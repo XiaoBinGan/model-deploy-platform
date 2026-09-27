@@ -16,13 +16,65 @@ const FRONTEND = path.join(__dirname, "..", "frontend", "index.html");
 // decorative. If the placeholder is missing we throw - better a loud 500 than
 // silently serving a page whose CSP does not apply.
 const NONCE_PLACEHOLDER = "{{CSP_NONCE}}";
+
+// Per-process CSRF token for the local API (DESK-29).
+//
+// Binding to 127.0.0.1 stops other *machines* but not other *pages*: any site
+// the user visits can POST here, and the install endpoint is a GET that an
+// <img> can fire. CORS does not help - it gates reading the response, not
+// sending the request - and jsonBody never looked at content-type, so a
+// text/plain POST (a CORS "simple request") needed no preflight at all.
+// An <img> sends no Origin header, so an Origin check alone cannot see it.
+// A token in the page the server itself rendered is the part an attacker
+// page cannot obtain.
+const API_TOKEN = crypto.randomBytes(24).toString("base64url");
+const TOKEN_PLACEHOLDER = "{{API_TOKEN}}";
+
 function renderIndex() {
   const html = fs.readFileSync(FRONTEND, "utf8");
   const parts = html.split(NONCE_PLACEHOLDER);
   if (parts.length !== 3) {
     throw new Error("frontend/index.html 应有 2 处 CSP nonce 占位符，实际 " + (parts.length - 1));
   }
-  return parts.join(crypto.randomBytes(16).toString("base64"));
+  const withNonce = parts.join(crypto.randomBytes(16).toString("base64"));
+  const tparts = withNonce.split(TOKEN_PLACEHOLDER);
+  if (tparts.length !== 2) {
+    throw new Error("frontend/index.html 应有 1 处 API token 占位符，实际 " + (tparts.length - 1));
+  }
+  return tparts.join(API_TOKEN);
+}
+
+// Defence in depth for the local API. Two independent checks:
+//  - Host must be the loopback authority we are actually listening on. This
+//    is what defeats DNS rebinding: a page on evil.example that resolves to
+//    127.0.0.1 still sends Host: evil.example.
+//  - If an Origin is present it must match too. Browsers send Origin on every
+//    cross-origin POST, so this rejects cross-site fetches before the token
+//    is even consulted.
+// A request with no Origin is not a browser navigation: curl, the tests and
+// other local processes are not the threat model here - a local process can
+// run the command itself.
+function localAuthorityOk(req) {
+  const port = req.socket.localPort;
+  const hosts = ["127.0.0.1:" + port, "localhost:" + port, "[::1]:" + port];
+  if (hosts.indexOf(String(req.headers.host || "")) < 0) return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  return hosts.some((h) => origin === "http://" + h);
+}
+
+function tokenOk(req, url) {
+  const given = url.searchParams.get("token");
+  if (given && given === API_TOKEN) return true;
+  const hdr = req.headers["x-mdp-token"];
+  return typeof hdr === "string" && hdr === API_TOKEN;
+}
+
+// Returns true when the request was already refused.
+function requireToken(req, res, url) {
+  if (tokenOk(req, url)) return false;
+  send(res, 403, JSON.stringify({ detail: "缺少或错误的本地 API token" }));
+  return true;
 }
 
 // A local JSON API has no legitimate multi-megabyte request. 1 MiB keeps a
@@ -230,6 +282,13 @@ async function handle(req, res) {
   const parts = url.pathname.split("/").filter(Boolean);
   const method = req.method;
 
+  // Everything under /api belongs to the local assistant. A page on any other
+  // origin must not be able to drive it, so check who is asking before routing
+  // (DESK-29). Read-only routes are included: they leak this machine's specs.
+  if (url.pathname.indexOf("/api/") === 0 && !localAuthorityOk(req)) {
+    return send(res, 403, JSON.stringify({ detail: "cross-origin request refused" }));
+  }
+
   // Never forward a path-traversal attempt upstream. Literal ".." is already
   // normalized away by URL, so decode the remaining percent-encoded form.
   let decodedPath = url.pathname;
@@ -275,6 +334,9 @@ async function handle(req, res) {
   // their computer.
   if (parts[0] === "api" && parts[1] === "backends" && parts[2] && parts[3] === "install") {
     if (method !== "GET") return methodNotAllowed(res, "GET");
+    // A GET that installs software is reachable by <img src=...>, which sends
+    // no Origin to check. The token is the only thing an <img> cannot forge.
+    if (requireToken(req, res, url)) return undefined;
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
@@ -308,6 +370,7 @@ async function handle(req, res) {
     }));
         }
         if (method === "POST") {
+          if (requireToken(req, res, url)) return undefined;
           const body = await jsonBody(req);
           body.hardware = await probeCached();
           return send(res, 200, JSON.stringify(deploys.create(body)));
@@ -318,15 +381,20 @@ async function handle(req, res) {
       if (!deploys.get(id).id) return missingDeployment(res, id);
       if (!action) {
         if (method === "GET") return send(res, 200, JSON.stringify(deploys.get(id)));
-        if (method === "DELETE") return send(res, 200, JSON.stringify(await deploys.delete(id)));
+        if (method === "DELETE") {
+          if (requireToken(req, res, url)) return undefined;
+          return send(res, 200, JSON.stringify(await deploys.delete(id)));
+        }
         return methodNotAllowed(res, "GET, DELETE");
       }
       if (action === "start") {
         if (method !== "POST") return methodNotAllowed(res, "POST");
+        if (requireToken(req, res, url)) return undefined;
         return send(res, 200, JSON.stringify(deploys.start(id)));
       }
       if (action === "stop") {
         if (method !== "POST") return methodNotAllowed(res, "POST");
+        if (requireToken(req, res, url)) return undefined;
         return send(res, 200, JSON.stringify(await deploys.stop(id)));
       }
       if (action === "health") {
@@ -335,6 +403,7 @@ async function handle(req, res) {
       }
       if (action === "test") {
         if (method !== "POST") return methodNotAllowed(res, "POST");
+        if (requireToken(req, res, url)) return undefined;
         const body = await jsonBody(req);
         return send(res, 200, JSON.stringify(
           await deploys.test(id, body.message, body.model_name, body.max_tokens)

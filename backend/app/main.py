@@ -369,6 +369,12 @@ frontend_dir = Path(__file__).resolve().parents[1].parent / "frontend"
 # whose CSP does not apply.
 NONCE_PLACEHOLDER = "{{CSP_NONCE}}"
 
+# The desktop app substitutes this with a per-process token that guards its own
+# local API (DESK-29). The control plane has no local API of its own to protect,
+# and the page it serves talks only to the control plane, so it deliberately
+# serves an empty value: the placeholder must never reach a browser verbatim.
+TOKEN_PLACEHOLDER = "{{API_TOKEN}}"
+
 
 def _render_index() -> str:
     html = (frontend_dir / "index.html").read_text(encoding="utf-8")
@@ -378,6 +384,13 @@ def _render_index() -> str:
             status_code=500,
             detail=f"前端缺少 CSP nonce 占位符（应为 2 处，实际 {found} 处）",
         )
+    tokens = html.count(TOKEN_PLACEHOLDER)
+    if tokens != 1:
+        raise HTTPException(
+            status_code=500,
+            detail=f"前端缺少 API token 占位符（应为 1 处，实际 {tokens} 处）",
+        )
+    html = html.replace(TOKEN_PLACEHOLDER, "")
     return html.replace(NONCE_PLACEHOLDER, secrets.token_urlsafe(16))
 
 
