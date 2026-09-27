@@ -34,7 +34,12 @@ const PROBE = `(() => {
   const hw = [...document.querySelectorAll(".hw > .hwi")].map(box);
   const rows = {};
   hw.forEach((b) => { rows[b.t] = (rows[b.t] || 0) + 1; });
-  const fields = [...document.querySelectorAll("#deploy .form > .field")].map(box);
+  // Only visible fields: a field inside a hidden panel (the docker block is
+  // display:none until the docker backend is chosen) has width 0, and counting
+  // it made this test fail on every width for a layout that was actually fine.
+  // offsetParent is null exactly when an ancestor is display:none.
+  const fields = [...document.querySelectorAll("#deploy .form > .field")]
+    .filter((el) => el.offsetParent !== null).map(box);
   const overflow = [...document.querySelectorAll("main *")].filter((el) => {
     const r = el.getBoundingClientRect();
     return r.width > 0 && (r.right > innerWidth + 1 || r.left < -1);
@@ -44,7 +49,8 @@ const PROBE = `(() => {
     main: box(document.querySelector("main")).w,
     rows: Object.values(rows),
     minTile: Math.min(...hw.map((b) => b.w)),
-    minField: Math.min(...fields.map((b) => b.w)),
+    minField: fields.length ? Math.min(...fields.map((b) => b.w)) : Infinity,
+    visibleFields: fields.length,
     hScroll: document.documentElement.scrollWidth > innerWidth + 1,
     overflow,
   };
@@ -98,7 +104,8 @@ async function main() {
     if (m.overflow.length) problems.push("元素越界 " + m.overflow.join(","));
     if (m.rows.length > 1 && m.rows.some((n) => n === 1)) problems.push("格子落单 " + m.rows.join("+"));
     if (m.minTile < MIN_TILE) problems.push("格子过窄 " + m.minTile);
-    if (m.minField < MIN_FIELD) problems.push("输入框过窄 " + m.minField);
+    if (!m.visibleFields) problems.push("没有可见的输入框");
+    else if (m.minField < MIN_FIELD) problems.push("输入框过窄 " + m.minField);
     if (problems.length) broken.push(w + "px: " + problems.join(" | "));
     mainAt[w] = { main: m.main, ratio: m.main / m.win };
   }

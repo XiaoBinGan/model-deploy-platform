@@ -506,18 +506,31 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 
 已处理的平台事实：
 
-- macOS 上容器拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），
+- macOS 上容器拿不到 GPU。这不是推断，是实测：`docker run --gpus all` 直接报
+  `could not select device driver "" with capabilities: [[gpu]]`，容器里没有
+  `/dev/dri`、没有 `/dev/nvidia*`，`docker info` 显示运行时是 `linux` 的虚拟机。
   桌面端启动 docker 部署时会写 WARNING，**不假装能用 GPU**。
+- Linux（+ nvidia-container-toolkit）与 Windows（Docker Desktop 的 WSL2 后端）**能**直通。
+  vLLM/SGLang 在这两种机器上提供**一键拉取官方镜像**（`docker pull`，单个步骤），
+  拉完镜像已在本地时不再重复提供，并在弹框里给出「用 docker 后端部署」直接跳到部署表单。
+  详见 `docs/docker-design.md` §0.1。
 - Linux 的 Docker 安装**不提供一键命令**：装 Docker Engine 需要 root 且各发行版命令不同，
   而 `curl https://get.docker.com | sh` 是管道执行，违反「argv 数组、不过 shell」的信任边界。
 - WSL2 检测读 `/proc/version`（而不是「有没有 `wsl` 命令」），避免把 WSL 的内存限额当宿主机内存。
 
+已经验证的（容器生命周期）：
+
+- 启动 Docker Desktop（4.38.0 / Docker 27.5.1）后，用应用真实跑通了
+  「拉镜像 → 启动容器 → `docker rm -f` 清理」：容器确实以 `mdp-<部署 id>` 为名、
+  按推导出的端口映射运行，删除后 `docker ps -a` 为空。
+  在此之前这部分只有假二进制测试（`desktop/test-docker.js`，89 项）。
+
 未验证的部分（不要当成已完成）：
 
-- 开发机是 macOS（Apple M5），有 NVIDIA 显卡的话才谈得上 GPU 容器，本机没有。
-  Docker Desktop 装了但守护进程未运行（`_caps()` 返回 `docker: false`）。
-  docker 执行路径目前用假二进制测（`desktop/test-docker.js`，83 项），
-  **没有做过真实容器集成测试**。
+- **GPU 直通本身**：开发机是 macOS（Apple M5），没有 NVIDIA 显卡，
+  容器根本拿不到 GPU，所以「`--gpus all` 在 Linux/Windows 上真的生效」只在文档与
+  `gpuPath()` 的说明里，**没有在真机跑过**。
+- **真实推理镜像**：没有跑过 `vllm/vllm-openai`，只跑过 `nginx:alpine` 验证容器生命周期。
 - Windows nsis 安装包配置已写，但**没有在 Windows 上构建或运行过**。
 
 ---
