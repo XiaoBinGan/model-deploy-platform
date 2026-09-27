@@ -1,12 +1,12 @@
 import os
+import secrets
 import socket
 import subprocess
 from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pathlib import Path
 from pydantic import BaseModel
 
@@ -359,7 +359,31 @@ def backends():
     payload["allow_remote_deploy"] = ALLOW_REMOTE_DEPLOY
     return payload
 
-# Mount frontend
+# Frontend
 frontend_dir = Path(__file__).resolve().parents[1].parent / "frontend"
-if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+
+# The page ships a nonce *placeholder* rather than a value, and gets a fresh
+# random one on every response. A fixed nonce would be public (this repo is),
+# so anyone able to inject markup could reuse it and the CSP would be
+# decorative. A missing placeholder raises rather than silently serving a page
+# whose CSP does not apply.
+NONCE_PLACEHOLDER = "{{CSP_NONCE}}"
+
+
+def _render_index() -> str:
+    html = (frontend_dir / "index.html").read_text(encoding="utf-8")
+    found = html.count(NONCE_PLACEHOLDER)
+    if found != 2:
+        raise HTTPException(
+            status_code=500,
+            detail=f"前端缺少 CSP nonce 占位符（应为 2 处，实际 {found} 处）",
+        )
+    return html.replace(NONCE_PLACEHOLDER, secrets.token_urlsafe(16))
+
+
+# These must be declared before any catch-all mount so the raw file (with the
+# unsubstituted placeholder) is never served.
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def frontend_index():
+    return HTMLResponse(_render_index())

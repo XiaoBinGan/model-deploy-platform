@@ -12,11 +12,19 @@
      inline onclick/onchange attributes left (and none can be injected usefully -
      script-src-attr falls back to script-src, so injected handlers are refused too).
 
-     The nonce is a fixed string in a static file, not a per-response value: this file
-     is served as-is by both the desktop server and the control plane, with no
-     templating to generate one. It is still worth having - an injected tag cannot
-     guess it, and the DOM hides nonce values from getAttribute - but it is NOT a
-     substitute for escaping. esc()/textContent remain the primary defence.
+     The nonce below is a PLACEHOLDER, not a value. Both servers that serve this file
+     substitute a fresh random nonce per response (desktop/server.js renderIndex(),
+     backend/app/main.py _render_index()), and both FAIL LOUDLY if the placeholder is
+     missing, rather than quietly serving a page whose CSP does not apply.
+
+     A fixed nonce would be worthless here: this repo is public, so the string would
+     be public too, and anyone who can inject markup could simply reuse it. A per-
+     response value cannot be reused or pre-guessed.
+
+     Measured, and worth stating because it is easy to assume otherwise: the DOM does
+     NOT hide the nonce from getAttribute (it returns the real value). Only running
+     script can read it - and running script is exactly what the CSP blocks. It is
+     still NOT a substitute for escaping; esc()/textContent remain the primary defence.
 
      style-src still needs 'unsafe-inline': the page has one inline <style> block and
      inline style="" attributes throughout.
@@ -24,7 +32,7 @@
      frame-ancestors and sandbox are deliberately absent: they are ignored when
      delivered via <meta>, and listing them here would imply protection that does
      not exist. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-mdp-static-1'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{CSP_NONCE}}'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>ModelForge</title>
 <style>
 :root{--bg:#0b0d10;--surface:#12161b;--raised:#181e25;--border:#252d37;--text:#e8edf3;--muted:#8b96a5;--primary:#8290ff;--ok:#32d583;--warn:#fdb022;--danger:#f97066;--pad:24px}
@@ -232,7 +240,7 @@ details.card[open]>summary{margin-bottom:12px}
 </div>
 
 </main>
-<script nonce="mdp-static-1">
+<script nonce="{{CSP_NONCE}}">
 function jump(id){
   var el=document.getElementById(id);
   if(!el){return;}

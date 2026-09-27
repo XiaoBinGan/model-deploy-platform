@@ -291,6 +291,27 @@ function rawRequest(port, rawPath, method) {
   check("page size keeps Apple Silicon 16K when sysctl says so",
     choosePageSize("16384", "") === 16384, String(choosePageSize("16384", "")));
 
+  // --- CSP nonce is substituted per response -------------------------------
+  // The page ships a placeholder, not a value. Serving it raw would leave the
+  // CSP with a fixed, public nonce - worthless, because this repo is public.
+  const META = /script-src 'nonce-([^']+)'/;
+  const TAG = /<script nonce="([^"]+)"/;
+  const page1 = await (await fetch(base)).text();
+  const page2 = await (await fetch(base)).text();
+  const nonce1 = (META.exec(page1) || [])[1];
+  const nonce2 = (META.exec(page2) || [])[1];
+  check("served page has no leftover placeholder",
+    !page1.includes("{{CSP_NONCE}}"), page1.includes("{{CSP_NONCE}}") ? "placeholder leaked" : "clean");
+  check("meta and script tag carry the SAME nonce",
+    !!nonce1 && nonce1 === (TAG.exec(page1) || [])[1],
+    'meta=' + nonce1 + ' tag=' + (TAG.exec(page1) || [])[1]);
+  check("desktop server issues a fresh nonce per response",
+    !!nonce1 && !!nonce2 && nonce1 !== nonce2, nonce1 + " vs " + nonce2);
+  const nonces = new Set();
+  for (let i = 0; i < 6; i += 1) nonces.add((META.exec(await (await fetch(base)).text()) || [])[1]);
+  check("6 responses give 6 distinct nonces", nonces.size === 6, "distinct=" + nonces.size);
+  check("/index.html is templated too, not served raw",
+    !(await (await fetch(base + "index.html")).text()).includes("{{CSP_NONCE}}"));
   await s.close();
   upstream.server.closeAllConnections();
   upstream.server.close();

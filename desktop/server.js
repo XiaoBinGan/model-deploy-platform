@@ -1,6 +1,7 @@
 "use strict";
 
 const http = require("node:http");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { probe } = require("./probe");
@@ -8,6 +9,21 @@ const { Deployments } = require("./deploy");
 
 const SERVICE = (process.env.MDP_SERVICE || "http://127.0.0.1:8790").replace(/[/]+$/, "");
 const FRONTEND = path.join(__dirname, "..", "frontend", "index.html");
+
+// The page ships a nonce *placeholder* rather than a value, and gets a fresh
+// random one on every response. A fixed nonce would be public (this repo is),
+// so anyone able to inject markup could reuse it and the CSP would be
+// decorative. If the placeholder is missing we throw - better a loud 500 than
+// silently serving a page whose CSP does not apply.
+const NONCE_PLACEHOLDER = "{{CSP_NONCE}}";
+function renderIndex() {
+  const html = fs.readFileSync(FRONTEND, "utf8");
+  const parts = html.split(NONCE_PLACEHOLDER);
+  if (parts.length !== 3) {
+    throw new Error("frontend/index.html 应有 2 处 CSP nonce 占位符，实际 " + (parts.length - 1));
+  }
+  return parts.join(crypto.randomBytes(16).toString("base64"));
+}
 
 // A local JSON API has no legitimate multi-megabyte request. 1 MiB keeps a
 // runaway body from being buffered whole in the Electron main process.
@@ -229,7 +245,7 @@ async function handle(req, res) {
   if (url.pathname === "/" || url.pathname === "/index.html") {
     if (method !== "GET" && method !== "HEAD") return methodNotAllowed(res, "GET, HEAD");
     try {
-      return send(res, 200, fs.readFileSync(FRONTEND, "utf8"), "text/html; charset=utf-8");
+      return send(res, 200, renderIndex(), "text/html; charset=utf-8");
     } catch (e) {
       return send(res, 500, "找不到 frontend/index.html", "text/plain; charset=utf-8");
     }

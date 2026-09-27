@@ -107,10 +107,25 @@ Electron 在开发模式下会打印 `Insecure Content-Security-Policy` 警告�
 **第二步（最终形态）**：把 `'unsafe-inline'` 也去掉。
 
 ```
-default-src 'none'; script-src 'nonce-mdp-static-1'; style-src 'unsafe-inline';
+default-src 'none'; script-src 'nonce-<每次响应随机>'; style-src 'unsafe-inline';
 img-src 'self' data:; font-src 'self'; connect-src 'self';
 object-src 'none'; base-uri 'none'; form-action 'none'
 ```
+
+`frontend/index.html` 里写的是**占位符** `{{CSP_NONCE}}`，不是值。
+两个会送出这个文件的服务端各自在响应时替换成随机值：
+
+- `desktop/server.js` 的 `renderIndex()`
+- `backend/app/main.py` 的 `_render_index()`（原先的 `StaticFiles` 挂载必须撤掉，
+  否则它会原样送出带占位符的文件）
+
+**为什么必须是随机的**：这个仓库是公开的。如果 nonce 是一个写死的字符串，
+那它就是一个**公开常量** —— 能注入 markup 的人可以直接把它抄进
+`<script nonce="...">`，CSP 就纯粹是装饰。固定 nonce 在「防注入」这个场景下
+提供的保护等于零，而这恰恰是它唯一存在的理由。
+
+**占位符缺失时两个服务端都会大声失败**（500 + 明确原因），而不是静默返回
+一个 CSP 形同虚设的页面。宁可页面挂了，也不要一个看起来在保护、实际没保护的页面。
 
 ### 怎么去掉 `script-src 'unsafe-inline'` 的
 
@@ -134,12 +149,30 @@ object-src 'none'; base-uri 'none'; form-action 'none'
 原本断言 `inlineRan === true` 并注明「这是已知边界，不是回归」；去掉 `unsafe-inline`
 之后它按设计变红，于是改成断言新的、更强的行为。）
 
+### 一条我写错过的论断（留在这里以免再犯）
+
+上一版这条文档里写着「浏览器会对 `getAttribute('nonce')` 隐藏 nonce 值，
+所以注入的标签读不到」。**这是错的**，实测：
+
+| 读法 | 实测结果 |
+|---|---|
+| `script.getAttribute('nonce')` | **返回真实值**（没有被隐藏） |
+| `script.nonce` | 返回真实值 |
+
+（我原本以为这是 CSP3 的 nonce hiding，但在这个 Electron/Chromium 里没有生效。）
+真正拦住注入的**不是**「读不到 nonce」，而是「**跑不了脚本**」——
+而读 nonce 本身就需要跑脚本。所以随机 nonce 依然成立，只是理由换了：
+保护来自「每次响应都不同、无法预先猜到」，不来自「读不到」。
+
+这也说明为什么固定 nonce 不行：它不需要被「读」，它就在公开仓库里。
+
 ### 仍然要说清楚的限制
 
-- **static nonce 不是 per-response nonce**。这个文件由桌面端和控制面**原样**送出，
-  没有模板化去生成随机 nonce。它的价值在于「注入的标签猜不到」以及浏览器对
-  `getAttribute('nonce')` 的隐藏；**它不是 XSS 防护的替代品**。
-  防注入仍然只有 `esc()` / `badge()` / `textContent` 这一层。
+- **nonce 不是 XSS 防护的替代品**。如果 `esc()` 没漏，注入根本进不来；
+  这条 CSP 是「万一漏了」的第二层。防注入的主防线仍然只有
+  `esc()` / `badge()` / `textContent`。
+- **两个服务端的替换逻辑是各自实现的**，没有共享代码。一处改了另一处没改
+  不会被测试直接发现（两侧各有独立测试，但测的是各自的行为）。
 - **`style-src 'unsafe-inline'` 保留**：页面有一个内联 `<style>` 块，
   以及遍布各处的 `style=""` 属性。样式注入的危害远小于脚本注入。
 - **没有写 `frame-ancestors` 和 `sandbox`**：这两个指令通过 `<meta>` 传递时
@@ -154,7 +187,9 @@ object-src 'none'; base-uri 'none'; form-action 'none'
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 passed
+cd backend && .venv/bin/python -m pytest tests/test_frontend_nonce.py -q   # 5 passed
 cd desktop && node test-trust.js                                          # 15 passed
+cd desktop && node test-server.js                                         # 81 passed（含 5 条 nonce 断言）
 ```
 
 前端侧另有 8 条 CSP / 注入断言在 `desktop/test-frontend.js`（真的在渲染进程里验证）。
