@@ -142,6 +142,7 @@ details.card[open]>summary{margin-bottom:12px}
   <div id="deploy-advisory" class="advisory" style="display:none">
     <div class="muted">服务端不能把模型部署到你的机器上。请在本机执行：</div>
     <pre id="advisory-cmd" style="margin-top:8px">—</pre>
+    <div class="muted" id="advisory-note" style="margin-top:6px"></div>
     <div class="actions"><button class="mini" data-act="copyAdvisory">复制命令</button></div>
   </div>
   <div class="form">
@@ -943,6 +944,90 @@ function syncDeploy(){
   renderOriginHint();
   refreshAdvisory();
 }
+// ---- 本地拼命令（DESK-28）-------------------------------------------------
+// 不采用控制面返回的 command_string。控制面按设计是不可信的，而这条字符串会被
+// 展示给用户、让他复制到 shell 里执行 —— 那等于让不可信的一方**直接选择要运行
+// 的程序**（curl / sh / 任何东西），比参数注入严重得多。
+// 桌面端为此已经改过一次（DESK-01 不再 spawn 控制面的 argv）；这里是同一个洞
+// 在浏览器侧的翻版，只是「执行者」变成了用户本人。
+//
+// 从服务端只取两个标量，且都再过一遍本地校验：
+//   decision.planned_window  整数，夹到 [1024, 1048576]
+//   decision.kv_quant        白名单 {f16, q8_0}
+// 其余全部来自用户在本页填的字段。
+var MIN_WINDOW_C=1024, MAX_WINDOW_C=1048576, DEFAULT_WINDOW_C=65536;
+var KV_WHITELIST={'f16':'f16','q8_0':'q8_0'};
+// 本页写死的常量，需要保留 shell 变量展开（见 shq）。
+var HF_MOUNT_HOST='$HOME/.cache/huggingface';
+
+function safeWindowC(v){
+  var n=Number(v);
+  if(!Number.isFinite(n)){return DEFAULT_WINDOW_C;}
+  n=Math.floor(n);
+  if(n<MIN_WINDOW_C||n>MAX_WINDOW_C){return DEFAULT_WINDOW_C;}
+  return n;
+}
+// 按 Python shlex.quote 的规则加引号：只在必要时才加。全加引号虽然功能等价，
+// 但 `'ollama' 'run' 'qwen3:8b'` 这种输出会让人以为命令出了问题。
+var SAFE_TOKEN=/^[A-Za-z0-9_@%+=:,./-]+$/;
+function shq(s){
+  s=String(s);
+  if(s===HF_MOUNT_HOST){return '"'+s+'"';}
+  if(s!==''&&SAFE_TOKEN.test(s)){return s;}
+  return "'"+s.replace(/'/g,"'\\''")+"'";
+}
+function shjoin(argv){return argv.map(shq).join(' ');}
+function inferContainerPortC(image){
+  var n=String(image||'').toLowerCase();
+  if(n.indexOf('sglang')>=0){return 30000;}
+  if(n.indexOf('vllm')>=0){return 8000;}
+  return 8080;
+}
+// 返回 argv 数组；无法本地拼的后端返回 null —— 那种情况宁可不给命令，
+// 也不要照搬服务端的字符串。
+function localAdvisoryCommand(plan){
+  var dec=(plan&&plan.decision)||{};
+  var backend=document.getElementById('d-backend').value;
+  var path=document.getElementById('d-path').value;
+  var port=+document.getElementById('d-port').value||8000;
+  var w=safeWindowC(dec.planned_window);
+  var kv=KV_WHITELIST[dec.kv_quant]||'q8_0';
+  if(backend==='ollama'){return ['ollama','run',path];}
+  if(backend==='llama.cpp'||backend==='llamacpp'){
+    return ['llama-server','-m',path,'--host','127.0.0.1','--port',String(port),
+      '-c',String(w),'-ctk',kv,'-ctv',kv,'-fa','on','-ngl','99'];
+  }
+  if(backend==='transformers'){
+    return ['python','-m','app.runtimes.transformers_server','--model-path',path,
+      '--host','127.0.0.1','--port',String(port),'--dtype','bfloat16'];
+  }
+  if(backend==='docker'){
+    var f=dockerFields();
+    if(f.errors&&f.errors.length){return null;}
+    var cport=inferContainerPortC(f.image);
+    var argv=['docker','run','--rm','-p','127.0.0.1:'+port+':'+cport];
+    if(f.gpus!=='none'){argv.push('--gpus',f.gpus||'all');}
+    var hasHf=false, i;
+    for(i=0;i<f.volumes.length;i++){
+      argv.push('-v',f.volumes[i].host+':'+f.volumes[i].container+(f.volumes[i].ro?':ro':''));
+      if(f.volumes[i].container==='/hf'){hasHf=true;}
+    }
+    argv.push('-e','HF_HOME=/hf');
+    if(!hasHf){argv.push('-v',HF_MOUNT_HOST+':/hf');}
+    argv.push(f.image);
+    var fam=f.image.toLowerCase();
+    if(fam.indexOf('vllm')>=0){
+      argv.push('--model',path,'--host','0.0.0.0','--port',String(cport));
+    } else if(fam.indexOf('sglang')>=0){
+      argv.push('--model-path',path,'--host','0.0.0.0','--port',String(cport),
+        '--context-length',String(w));
+    }
+    for(i=0;i<f.extra_args.length;i++){argv.push(f.extra_args[i]);}
+    return argv;
+  }
+  return null;
+}
+
 async function refreshAdvisory(){
   var remote=LAST&&LAST.client_is_local===false;
   var allowed=CONFIG.allow_remote_deploy===true;
@@ -961,7 +1046,15 @@ async function refreshAdvisory(){
         pbody.image=pdf.image;pbody.gpus=pdf.gpus;pbody.volumes=pdf.volumes;pbody.extra_args=pdf.extra_args;
       }
       var d=await (await fetch('/api/plans/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(pbody)})).json();
-      document.getElementById('advisory-cmd').textContent=d.command_string;
+      var argv=localAdvisoryCommand(d);
+      var note=document.getElementById('advisory-note');
+      if(!argv){
+        document.getElementById('advisory-cmd').textContent='—';
+        note.textContent='这个后端不在本页面本地拼命令的范围内，请用桌面端部署；不要照抄服务端返回的命令。';
+      } else {
+        document.getElementById('advisory-cmd').textContent=shjoin(argv);
+        note.textContent='这条命令由本页面按你填写的内容拼出；服务端只提供了上下文窗口。';
+      }
     }catch(e){}
   } else {
     advisory.style.display='none';

