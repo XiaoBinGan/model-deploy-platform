@@ -81,6 +81,42 @@ function safePort(value, fallback) {
   return n;
 }
 
+// The model reference is the one caller-supplied value that reaches spawn() as
+// an argument, and until now it arrived completely unchecked (DESK-26). It is
+// filled from the control plane's catalog: fillDeployModels stores
+// source.ollama / source.huggingface as the deploy path, while the dropdown
+// shows the model's *display name*. So a hostile catalog has the user approve
+// one string and run another.
+//
+// argv arrays already keep shell metacharacters from being interpreted, so this
+// is argument injection rather than RCE: a leading "-" is read as a flag, and a
+// control character ends the argument outright. Both are rejected, together
+// with values that cannot be a model reference at all.
+const MAX_MODEL_REF = 200;
+
+// Ollama tags are [registry/][namespace/]name[:tag]. Anything outside this set
+// is not a tag - in particular a space, a leading "-" or a leading "/" is not.
+const OLLAMA_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/;
+
+function safeModelRef(value, backend) {
+  const raw = value === undefined || value === null ? "" : String(value);
+  if (!raw) return "";
+  if (raw.length > MAX_MODEL_REF) {
+    throw new Error("模型标识过长（上限 " + MAX_MODEL_REF + " 字符）");
+  }
+  // NUL truncates argv; newlines forge log lines. Neither can be in a model name.
+  if (/[\u0000-\u001f\u007f]/.test(raw)) {
+    throw new Error("模型标识含控制字符");
+  }
+  if (raw.charAt(0) === "-") {
+    throw new Error("模型标识不能以 - 开头（会被当成命令行选项）");
+  }
+  if (backend === "ollama" && !OLLAMA_TAG.test(raw)) {
+    throw new Error("不是合法的 ollama 标签：" + raw);
+  }
+  return raw;
+}
+
 // The container port is inferred from the image, never supplied by the caller
 // (docs/docker-design.md §3).
 function inferContainerPort(image) {
@@ -184,6 +220,24 @@ class Deployments {
     this._load();
   }
 
+  // Keeps the invariant "everything in this.items has a spawnable model
+  // reference". Returns false for a row that must not be admitted; the reason
+  // is recorded on the item so the UI can explain the disappearance rather than
+  // silently losing a deployment (DESK-14/26).
+  _acceptLoaded(item) {
+    if (!item || !item.id) return false;
+    try {
+      item.model_path = safeModelRef(item.model_path, item.backend);
+      return true;
+    } catch (e) {
+      item.status = "BLOCKED";
+      item.log = (item.log || []).concat("拒绝加载：" + e.message);
+      this._rejected = this._rejected || [];
+      this._rejected.push({ id: item.id, reason: e.message });
+      return false;
+    }
+  }
+
   _load() {
     let text;
     try {
@@ -211,6 +265,11 @@ class Deployments {
         corrected = true;
       }
       item.pid = null;
+      // A file written before DESK-26 (or edited by hand) can hold a model
+      // reference that would reach spawn() unvalidated, so the invariant is
+      // enforced on load too. Skipped rather than thrown: one bad row must not
+      // take the whole list down.
+      if (!this._acceptLoaded(item)) continue;
       this.items.set(item.id, item);
     }
     this.seq = raw.seq || this.items.size;
@@ -255,7 +314,10 @@ class Deployments {
       for (const item of disk.items) {
         if (!item || !item.id) continue;
         if (this._removed.has(item.id)) continue;
-        if (!this.items.has(item.id)) this.items.set(item.id, item);
+        if (this.items.has(item.id)) continue;
+        // Same invariant as _load: another window's file is still a file.
+        if (!this._acceptLoaded(item)) continue;
+        this.items.set(item.id, item);
       }
       if (typeof disk.seq === "number" && disk.seq > this.seq) this.seq = disk.seq;
     }
@@ -588,6 +650,9 @@ class Deployments {
       modelPath = req.model_name || req.model_path || req.model_id;
       if (!modelPath) throw new Error("ollama 部署必须提供 model_name（或 model_path）");
     }
+    // Rejected before anything is stored, so a bad value cannot reach spawn()
+    // later and cannot be persisted to deployments.json (DESK-26).
+    modelPath = safeModelRef(modelPath, backend);
     // The docker-only fields are validated before anything is stored, and a
     // rejection reaches the caller as a 400 (docs/docker-design.md §5).
     const docker = backend === "docker" ? validateDockerFields(req) : null;

@@ -160,6 +160,63 @@ function hostileService(reply) {
   await d2.stop(item2.id);
   badSvc.server.close();
 
+  // --- case 4: the model reference itself (DESK-26) -----------------------
+  // model_path is filled from the control plane's catalog (source.ollama /
+  // source.huggingface) while the dropdown shows the *display name*, and it
+  // reaches spawn() as an argument. Nothing validated it.
+  const d4 = new Deployments(path.join(dir, "d4"), "");
+  const mustReject = [
+    ["--help", "ollama", "ollama 标签以 - 开头（会被 pull 当成 flag）"],
+    ["--registry http://evil.example", "ollama", "带空格的参数注入"],
+    ["x\u0000y", "ollama", "NUL 会截断 argv"],
+    ["a\nb", "ollama", "换行会伪造日志行"],
+    ["-m/etc/passwd", "llama.cpp", "路径以 - 开头"],
+    ["ok:tag", "ollama", null], // 占位：下面单独处理长度
+  ].filter((c) => c[2]);
+  for (const [val, backend, why] of mustReject) {
+    let rejected = false;
+    try { d4.create({ backend, model_name: val, model_path: val, port: 8000 }); }
+    catch (e) { rejected = true; }
+    check("DESK-26 拒绝 " + JSON.stringify(val) + "（" + why + "）", rejected,
+      rejected ? "已拒绝" : "被接受了");
+  }
+  // 合法值必须仍然接受，否则这个校验就是在帮倒忙。
+  const mustAccept = [
+    ["qwen3:8b", "ollama"],
+    ["hf.co/user/repo:Q4_K_M", "ollama"],
+    ["llama3.2:3b", "ollama"],
+    ["/models/my model.gguf", "llama.cpp"],
+    ["Qwen/Qwen2.5-7B-Instruct-GGUF", "llama.cpp"],
+  ];
+  for (const [val, backend] of mustAccept) {
+    let ok = true;
+    try { d4.create({ backend, model_name: val, model_path: val, port: 8000 }); }
+    catch (e) { ok = false; }
+    check("DESK-26 合法值仍接受 " + JSON.stringify(val), ok);
+  }
+  check("DESK-26 超长模型标识被拒", (() => {
+    try { d4.create({ backend: "ollama", model_name: "a".repeat(500), port: 8000 }); return false; }
+    catch (e) { return true; }
+  })());
+
+  // 磁盘上已有的恶意行：_load 也必须挡住，不能只在 create() 挡。
+  const evilDir = path.join(dir, "d5");
+  fs.mkdirSync(evilDir, { recursive: true });
+  fs.writeFileSync(path.join(evilDir, "deployments.json"), JSON.stringify({
+    seq: 1,
+    items: [
+      { id: "dep_evil", backend: "ollama", model_path: "--help", status: "STOPPED", log: [] },
+      { id: "dep_ok", backend: "llama.cpp", model_path: "/models/good.gguf", status: "STOPPED", log: [] },
+    ],
+  }));
+  const d5 = new Deployments(evilDir, "");
+  check("DESK-26 _load 丢弃持久化的恶意 model_path",
+    !d5.items.has("dep_evil") && d5.items.has("dep_ok"),
+    [...d5.items.keys()].join(","));
+  check("DESK-26 被丢弃的行留了原因，不是静默消失",
+    (d5._rejected || []).some((r) => r.id === "dep_evil"),
+    JSON.stringify(d5._rejected || []));
+
   // --- case 3: port validation ---
   const d3 = new Deployments(path.join(dir, "d3"), "");
   const weird = d3.create({ backend: "llama.cpp", model_path: model, port: "99999" });

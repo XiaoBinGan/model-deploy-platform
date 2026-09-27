@@ -183,12 +183,70 @@ object-src 'none'; base-uri 'none'; form-action 'none'
 
 ---
 
+## DESK-26 · `model_path` 一路没校验就进了 spawn（一般，参数注入）
+
+DESK-01 修掉的是「服务端直接给 argv」。但还有一个**值**从控制面流进了 argv,
+而且完全没有校验：`model_path`。
+
+流向是这样的（注意中间没有用户确认，也没有校验）：
+
+```
+控制面 /api/models/recommend
+  -> r.source.ollama / r.source.huggingface        （frontend: fillDeployModels）
+  -> DEPLOY_MODELS[i].path
+  -> syncDeploy() 写进 #d-path（自动填充）
+  -> createDeploy() 发出 model_path
+  -> desktop create() 原样存下
+  -> spawn("ollama", ["pull", model_path])        （或 -m / --model）
+```
+
+**最别扭的地方**：下拉框里显示的是 `r.name`（模型**显示名**），实际执行的却是
+`source.ollama` / `source.huggingface`（**另一个字段**）。用户批准的是
+「Qwen3 8B」这个字符串，机器跑的可能是别的。
+
+实测（修复前，`create()` 照单全收）：
+
+| 输入 | 结果 |
+|---|---|
+| `--help` | 接受 → `ollama pull --help`，被当成 flag |
+| `--registry http://evil.example` | 接受（**带空格也接受**） |
+| `x\u0000y` | 接受 → NUL 会截断 argv |
+| `a\nb` | 接受 → 换行会伪造日志行 |
+
+**修法**：`safeModelRef(value, backend)`，在三个入口强制不变量
+「`this.items` 里的 `model_path` 恒可安全 spawn」：
+
+1. `create()` —— 存之前拒，错误直接到 UI
+2. `_load()` —— 磁盘上修复前遗留的行也要挡（否则重启一次就绕过了）
+3. `_save()` 的跨窗口合并 —— 另一个窗口写的文件同样是文件
+
+规则：长度上限 200；拒绝控制字符（NUL / 换行）；拒绝以 `-` 开头；
+`ollama` 后端额外要求匹配标签语法
+`[registry/][namespace/]name[:tag]`。
+被丢弃的行**留原因**（`_rejected`）而不是静默消失 —— 沿用 DESK-14 的教训。
+
+**必须说清楚：这只修了参数注入，还有一类没修。**
+
+`evil-registry.example.com/backdoor:latest` **仍然是合法标签，仍然被接受**。
+因为 ollama 本来就支持从任意 registry 拉取（`hf.co/user/repo:tag` 就是这个语法），
+没法靠格式校验区分「用户想从 HF 拉」和「控制面想让你从攻击者机器拉」。
+
+所以仍然存在的风险是：**恶意控制面可以让桌面端从一个攻击者控制的 registry
+拉取模型权重**。权重是数据，但加载它的解析器（GGUF / safetensors）出过 CVE,
+所以这不是零风险。目前唯一的缓解是 `#d-path` 输入框可见 —— 用户有机会看到
+实际值，但它是自动填充的，很容易被忽略。
+
+**没有做的**：让 UI 明确提示「这个值来自控制面目录，不是你填的」。
+这是已知的、未修的产品层缺口，不是「已缓解」。
+
+---
+
 ## 测试
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 passed
 cd backend && .venv/bin/python -m pytest tests/test_frontend_nonce.py -q   # 5 passed
-cd desktop && node test-trust.js                                          # 15 passed
+cd desktop && node test-trust.js                                          # 28 passed（含 13 条 DESK-26）
 cd desktop && node test-server.js                                         # 81 passed（含 5 条 nonce 断言）
 ```
 
