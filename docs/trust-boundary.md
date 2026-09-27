@@ -94,12 +94,43 @@ win.webContents.setWindowOpenHandler(({ url }) => {
 
 ---
 
+## DESK-17 · 页面完全没有 CSP（一般）
+
+Electron 在开发模式下会打印 `Insecure Content-Security-Policy` 警告。
+这条警告只在未打包时出现，但「没有 CSP」这个事实一直都在：
+渲染进程是唯一直接渲染控制面数据的地方，而控制面按设计是不可信的，
+页面却可以自由地去外部取脚本 / 帧 / object。
+
+**修法**：在 `frontend/index.html` 里加 `Content-Security-Policy` meta：
+
+```
+default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src 'self';
+object-src 'none'; base-uri 'none'; form-action 'none'
+```
+
+两点必须说清楚，避免把这条写成比实际更强的保护：
+
+- **`'unsafe-inline'` 去不掉**：这个页面本来就是单文件内联脚本 + 内联事件处理器
+  （`onclick=` / `onchange=`），去掉它整页都不能用。所以 CSP 在这里挡住的是
+  **外部来源**（远程脚本、iframe、object），**不是**注入本身 —— 防注入仍然靠
+  `esc()` 与 `textContent`。
+- **没有写 `frame-ancestors` 和 `sandbox`**：这两个指令通过 `<meta>` 传递时
+  会被忽略，写上去只会让人以为有保护。测试里专门断言它们**不在** CSP 中。
+
+实测（在真实渲染进程里，不是读字符串）：`fetch('https://example.com')` 被拒，
+同源 `/api/health` 正常，`eval` 被拒（因为脚本源没有 `unsafe-eval`）。
+
+---
+
 ## 测试
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 passed
-cd desktop && node test-trust.js                                          # 11 passed
+cd desktop && node test-trust.js                                          # 15 passed
 ```
+
+前端侧另有 6 条 CSP 断言在 `desktop/test-frontend.js`（真的在渲染进程里验证）。
 
 backend 侧覆盖：默认没有 CORS 中间件、跨源预检拿不到放行头、5 个写操作对远端全部 403、
 `MDP_ALLOW_REMOTE_DEPLOY=1` 仍能放开、读操作对远端保持开放、

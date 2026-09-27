@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- This page renders data from a control plane the desktop does not trust, so it
+     must not be able to pull in remote script/frame/object content. `unsafe-inline`
+     is required by the app's own inline script and inline event handlers; it is NOT
+     a substitute for escaping, which is why esc()/textContent are still the primary
+     defence. frame-ancestors and sandbox are deliberately absent: they are ignored
+     when delivered via <meta>, and listing them here would imply protection that
+     does not exist. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>ModelForge</title>
 <style>
 :root{--bg:#0b0d10;--surface:#12161b;--raised:#181e25;--border:#252d37;--text:#e8edf3;--muted:#8b96a5;--primary:#8290ff;--ok:#32d583;--warn:#fdb022;--danger:#f97066;--pad:24px}

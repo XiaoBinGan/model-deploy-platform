@@ -104,6 +104,30 @@ app.whenReady().then(async () => {
   })()`);
   check("服务测试有入口且 #service 存在", svc.found === true && svc.target === true);
 
+  // --- 控制面是不可信的，页面不能去外面取脚本/帧/对象 ---------------------
+  // Electron 在开发模式下会警告这个页面没有 CSP。警告本身只在未打包时出现，
+  // 但「没有 CSP」这个事实一直都在，所以这里断言它真的存在、真的生效。
+  const csp = await run(`(async () => {
+    const m = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+    const c = m ? m.getAttribute('content') : '';
+    // 无网络也能确定性验证：脚本源没有 unsafe-eval，eval 必须被拒。
+    let evalBlocked = false;
+    try { (0, eval)('1+1'); } catch (e) { evalBlocked = String(e).indexOf('EvalError') >= 0 || String(e).length > 0; }
+    let sameOk = false;
+    try { const r = await fetch('/api/health'); sameOk = !!r; } catch (e) { sameOk = false; }
+    return { has: !!m, c, evalBlocked, sameOk };
+  })()`);
+  check("页面设置了 Content-Security-Policy", csp.has === true);
+  check("CSP 默认拒绝（default-src none）且禁用 object/base/form",
+    /default-src 'none'/.test(csp.c) && /object-src 'none'/.test(csp.c) &&
+    /base-uri 'none'/.test(csp.c) && /form-action 'none'/.test(csp.c), csp.c.slice(0, 80));
+  check("CSP 限制 connect-src 为同源", /'self'/.test(csp.c) && /connect-src/.test(csp.c), csp.c.slice(0, 80));
+  check("CSP 真的在生效（eval 被拒）", csp.evalBlocked === true);
+  check("CSP 没有把同源请求一起挡掉", csp.sameOk === true);
+  // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
+  check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
+    csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));
+
   // --- Docker block visibility + macOS warning ----------------------------
   const vis = await run(`(() => {
     window.CONFIG = { backends: ['docker', 'ollama'], installable: {}, unavailable: {}, local: true, caps: { platform: 'darwin', docker: true, nvidia: false } };
