@@ -133,6 +133,53 @@ app.whenReady().then(async () => {
   })()`);
   check("非 macOS 不显示 Mac 专属警告", noWarn.shown === false);
 
+  // --- a pulled Docker image must read as ready, not as "install again" ------
+  // The one-click install chain used to end nowhere: after `docker pull` the UI
+  // still showed the same install offer, with no sign the image was local and no
+  // pointer at the backend that actually runs it.
+  const ready = await run(`(() => {
+    window.CONFIG = {
+      backends: ['docker', 'ollama'], local: true,
+      caps: { platform: 'linux', docker: true, nvidia: true },
+      unavailable: {},
+      installable: { vllm: {
+        info: 'x', steps: [], manual: 'docker pull vllm/vllm-openai:latest',
+        via: 'docker', image: 'vllm/vllm-openai:latest', alreadyInstalled: true,
+        note: '官方镜像 vllm/vllm-openai:latest 已在本地，无需重新拉取。部署请用 docker 后端。',
+        gpu: 'g' } },
+    };
+    fillBackends();
+    const note = backendNote('vllm');
+    openInstallModal('vllm');
+    const body = document.getElementById('m-body').textContent;
+    const actions = document.getElementById('m-actions');
+    const shown = getComputedStyle(document.getElementById('modal')).display !== 'none';
+    const hasInstallBtn = !!document.getElementById('m-install');
+    const hasCloseBtn = !!document.getElementById('m-close5');
+    closeModal();
+    return { note, body, shown, hasInstallBtn, hasCloseBtn };
+  })()`);
+  check("已拉取的镜像在下拉里标为「镜像已就绪」", /镜像已就绪/.test(ready.note), ready.note);
+  check("已就绪时弹框打开且状态是「已在本地」", ready.shown === true && ready.body.indexOf('官方镜像已在本地') >= 0);
+  check("已就绪时不再显示「确认安装」按钮", ready.hasInstallBtn === false);
+  check("已就绪时只给关闭按钮", ready.hasCloseBtn === true);
+  check("已就绪时说明里指向 docker 后端", ready.body.indexOf('docker 后端') >= 0);
+  check("已就绪时不再列出将执行的步骤，显示「无需操作」", ready.body.indexOf('无需操作') >= 0);
+
+  // A not-yet-pulled image must still offer the install button - the ready state
+  // above must not swallow the normal case.
+  const notReady = await run(`(() => {
+    window.CONFIG.installable.vllm.alreadyInstalled = false;
+    window.CONFIG.installable.vllm.steps = ['拉取官方镜像'];
+    openInstallModal('vllm');
+    const hasInstallBtn = !!document.getElementById('m-install');
+    const body = document.getElementById('m-body').textContent;
+    closeModal();
+    return { hasInstallBtn, body };
+  })()`);
+  check("未拉取时仍然给出「确认安装」按钮", notReady.hasInstallBtn === true);
+  check("未拉取时状态是「本机未安装」", notReady.body.indexOf('本机未安装') >= 0);
+
   // An unavailable docker entry must not leave the docker block on screen: the
   // select reverts and opens the install dialog instead.
   const reverted = await run(`(() => {

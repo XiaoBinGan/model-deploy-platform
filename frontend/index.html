@@ -575,7 +575,11 @@ function backendStatus(b){
 function backendNote(b){
   var st=backendStatus(b);
   if(st.kind==='ready'){return '';}
-  if(st.kind==='installable'){return ' · 未安装，可一键安装';}
+  if(st.kind==='installable'){
+    // A pulled Docker image is installed in every sense that matters, so say so
+    // rather than offering the same download again.
+    return (st.data&&st.data.alreadyInstalled)?' · 镜像已就绪，可直接部署':' · 未安装，可一键安装';
+  }
   // "Cannot be installed here" and "this app cannot run it" are different
   // answers, and the second one is not fixed by installing anything.
   if(st.data&&st.data.kind==='runtime'){return ' · 桌面端跑不了';}
@@ -665,17 +669,27 @@ function openInstallModal(b){
   if(st.kind==='installable'){
     var d=st.data;
     MODAL_MANUAL=d.manual||'';
-    html+='<div class="mline"><span class="k">状态</span><span class="warn">本机未安装</span></div>';
-    html+='<div class="mline"><span class="k">将要执行</span></div>';
-    html+=(d.steps||[]).map(function(s,i){
-      return '<div class="stepline"><span class="n">'+(i+1)+'</span><span>'+esc(s)+'</span></div>';
-    }).join('');
+    var done=!!d.alreadyInstalled;
+    html+='<div class="mline"><span class="k">状态</span><span class="warn">'+(done?'官方镜像已在本地':'本机未安装')+'</span></div>';
+    if((d.steps||[]).length){
+      html+='<div class="mline"><span class="k">将要执行</span></div>';
+      html+=(d.steps||[]).map(function(s,i){
+        return '<div class="stepline"><span class="n">'+(i+1)+'</span><span>'+esc(s)+'</span></div>';
+      }).join('');
+    } else {
+      html+='<div class="mline"><span class="k">将要执行</span><span>无需操作</span></div>';
+    }
+    if(d.note){html+='<div class="mline"><span class="k">说明</span>'+esc(d.note)+'</div>';}
     if(d.gpu){html+='<div class="mline"><span class="k">GPU</span>'+esc(d.gpu)+'</div>';}
     html+='<div class="mline" style="margin-top:12px"><span class="k">等价命令</span></div>';
     html+='<pre>'+esc(d.manual||'')+'</pre>';
     body.innerHTML=html;
-    actions.innerHTML='<button class="primary" id="m-install">确认安装</button>'+
-      '<button class="mini" id="m-copy">复制命令</button>';
+    // Nothing left to run, so do not offer a button that would do nothing.
+    actions.innerHTML=done
+      ? '<button class="mini" id="m-close5">关闭</button>'
+      : '<button class="primary" id="m-install">确认安装</button>' +
+        '<button class="mini" id="m-copy">复制命令</button>';
+    if(done){document.getElementById('m-close5').onclick=closeModal;return;}
     document.getElementById('m-install').onclick=function(){runInstall(b);};
     document.getElementById('m-copy').onclick=copyModalCommand;
     return;
