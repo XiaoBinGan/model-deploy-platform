@@ -299,7 +299,13 @@ async function handle(req, res) {
     try {
       if (!id) {
         if (method === "GET") {
-          return send(res, 200, JSON.stringify({ deployments: deploys.list() }));
+          // `rejected` is usually empty. It is non-empty only when a persisted row was
+    // dropped for an unspawnable model_path - the window says so instead of a
+    // deployment silently disappearing (DESK-26).
+    return send(res, 200, JSON.stringify({
+      deployments: deploys.list(),
+      rejected: deploys.rejected(),
+    }));
         }
         if (method === "POST") {
           const body = await jsonBody(req);

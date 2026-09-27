@@ -221,21 +221,32 @@ class Deployments {
   }
 
   // Keeps the invariant "everything in this.items has a spawnable model
-  // reference". Returns false for a row that must not be admitted; the reason
-  // is recorded on the item so the UI can explain the disappearance rather than
-  // silently losing a deployment (DESK-14/26).
+  // reference". Returns false for a row that must not be admitted.
+  //
+  // Dropping a row must not be silent: it is logged here, listed by rejected()
+  // for the UI, and _load backs the file up before the next _save overwrites it
+  // (DESK-26, following the DESK-14 lesson).
   _acceptLoaded(item) {
     if (!item || !item.id) return false;
     try {
       item.model_path = safeModelRef(item.model_path, item.backend);
       return true;
     } catch (e) {
-      item.status = "BLOCKED";
-      item.log = (item.log || []).concat("拒绝加载：" + e.message);
       this._rejected = this._rejected || [];
-      this._rejected.push({ id: item.id, reason: e.message });
+      // _load() and the _save() merge both walk the same disk rows, so the same
+      // id is seen more than once. Without this the window would list one bad
+      // row as two, and the count would grow every save.
+      if (!this._rejected.some((r) => r.id === item.id)) {
+        this._rejected.push({ id: item.id, reason: e.message, model_path: item.model_path });
+        console.error("[deploy] 移除部署 " + item.id + "：" + e.message);
+      }
       return false;
     }
+  }
+
+  // Rows dropped as invalid, for the window to show. Empty in the common case.
+  rejected() {
+    return (this._rejected || []).slice();
   }
 
   _load() {
@@ -273,6 +284,10 @@ class Deployments {
       this.items.set(item.id, item);
     }
     this.seq = raw.seq || this.items.size;
+    // A rejected row is not admitted to items, so the next _save - which writes
+    // items - would delete it from disk. Back the file up first: a deployment
+    // must not vanish without a trace (DESK-14 lesson, applied to DESK-26).
+    if ((this._rejected || []).length) this._backupRejected();
     // Persist the correction so the file stops claiming RUNNING and the next
     // load does not append the restart line again (DESK-20).
     if (corrected) this._save();
@@ -285,6 +300,16 @@ class Deployments {
       console.error("[deploy] deployments.json 无法解析，已备份到 " + backup + "：" + err.message);
     } catch (e2) {
       console.error("[deploy] deployments.json 无法解析，备份也失败：" + e2.message);
+    }
+  }
+
+  _backupRejected() {
+    const backup = this.file + ".rejected.bak";
+    try {
+      fs.copyFileSync(this.file, backup);
+      console.error("[deploy] 已备份含非法 model_path 的部署文件到 " + backup);
+    } catch (e) {
+      console.error("[deploy] 备份失败（文件即将被覆盖）：" + e.message);
     }
   }
 

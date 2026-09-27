@@ -164,6 +164,7 @@ details.card[open]>summary{margin-bottom:12px}
       <div class="advisory" id="d-docker-warn" style="display:none;margin-top:10px"></div>
     </div>
   </div>
+  <div id="d-rejected" class="advisory" style="display:none;margin-top:14px"></div>
   <div id="d-list" class="log" style="margin-top:14px">暂无部署</div>
   <div class="muted" style="font-size:12px;margin:12px 0 5px">最近日志</div>
   <div id="d-log" class="log">—</div>
@@ -927,8 +928,21 @@ function usePick(){
   syncDeploy();
   jump('deploy');
 }
+// A deployment dropped on load must not just disappear. This is the window's
+// half of the promise made in deploy.js _acceptLoaded (DESK-26).
+function renderRejected(list){
+  var el=document.getElementById('d-rejected');
+  if(!el){return;}
+  if(!list||!list.length){el.style.display='none';el.textContent='';return;}
+  el.style.display='block';
+  el.innerHTML=list.map(function(r){
+    return '<div>已移除 <b>'+esc(r.id)+'</b>：'+esc(r.reason)+'（原值 '+esc(r.model_path)+'）</div>';
+  }).join('')+'<div class="muted">原文件已备份为 deployments.json.rejected.bak</div>';
+}
 async function refreshDeployments(){
-  try{DEPLOYMENTS=(await (await fetch('/api/deployments')).json()).deployments||[];}catch(e){DEPLOYMENTS=[];}
+  var rejected=[];
+  try{var _d=await (await fetch('/api/deployments')).json();DEPLOYMENTS=_d.deployments||[];rejected=_d.rejected||[];}catch(e){DEPLOYMENTS=[];}
+  renderRejected(rejected);
   var running=DEPLOYMENTS.filter(function(d){return d.status==='RUNNING';}).length;
   document.getElementById('hw-running').textContent=running;
   document.getElementById('svc-state').textContent=running?'● '+running+' 个服务运行中':'● 暂无运行服务';

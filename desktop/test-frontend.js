@@ -31,6 +31,7 @@ function check(name, ok, detail) {
 const INSTALL = `(() => {
   window.__CAP = [];
   window.__DEPS = [];
+  window.__REJECTED = [];
   window.__REC = null;
   window.__CONFIG = null;
   const json = (obj, ok, status) => Promise.resolve({ ok: ok === undefined ? true : ok, status: status || 200, json: () => Promise.resolve(obj) });
@@ -39,7 +40,7 @@ const INSTALL = `(() => {
     const u = String(url);
     const method = (opts.method || 'GET').toUpperCase();
     window.__CAP.push({ url: u, method: method, body: opts.body || null });
-    if (u === '/api/deployments' && method === 'GET') return json({ deployments: window.__DEPS });
+    if (u === '/api/deployments' && method === 'GET') return json({ deployments: window.__DEPS, rejected: window.__REJECTED || [] });
     if (u === '/api/deployments' && method === 'POST') return json({ id: 'dep_new' });
     if (u.indexOf('/api/deployments/') === 0) return json({});
     if (u === '/api/models/recommend') return json(window.__REC || {});
@@ -208,6 +209,43 @@ app.whenReady().then(async () => {
     JSON.stringify({ f: delegate.foundJump, u: delegate.urlUnchanged }));
   check("页面里已无任何内联事件处理器（CSP 会拒绝它们）",
     delegate.inlineHandlers === 0, String(delegate.inlineHandlers));
+
+  // --- DESK-26 的 UI 出口 ---------------------------------------------------
+  // deploy.js 承诺「被丢弃的部署不会静默消失」。只把原因存进 _rejected 不算兑现，
+  // 必须真的能画到页面上。这条从 /api/deployments 的 rejected 字段一路测到 DOM。
+  const rejectedUI = await run(`(async () => {
+    const out = {};
+    const el = document.getElementById('d-rejected');
+    out.exists = !!el;
+    // 先确认空的时候不占地方
+    window.__REJECTED = [];
+    await refreshDeployments();
+    out.hiddenWhenEmpty = getComputedStyle(el).display === 'none';
+    // 再喂一条被拒绝的行
+    window.__REJECTED = [{ id: 'dep_bad', reason: '模型标识不能以 - 开头', model_path: '--help' }];
+    await refreshDeployments();
+    out.shown = getComputedStyle(el).display !== 'none';
+    out.text = el.textContent;
+    // 注入面：reason / model_path 是文件来的，必须被 esc 掉。
+    // 注意别用 querySelector('b') 判定 —— 模板自己就有一个 <b>，那样会误报。
+    window.__REJECTED = [{ id: 'dep_x', reason: '<img src=x onerror=1>', model_path: '<b>x</b>' }];
+    await refreshDeployments();
+    out.noInjectedElement = el.querySelector('img') === null;
+    // 转义的证据：标签以字面量形式出现在文本里，而不是变成元素
+    out.literalInText = el.textContent.indexOf('<img src=x onerror=1>') >= 0;
+    out.escaped = out.noInjectedElement && out.literalInText;
+    window.__REJECTED = [];
+    await refreshDeployments();
+    return out;
+  })()`);
+  check("页面上有 #d-rejected 容器", rejectedUI.exists === true);
+  check("没有拒绝项时容器不显示", rejectedUI.hiddenWhenEmpty === true);
+  check("有拒绝项时页面明确显示，不再静默消失",
+    rejectedUI.shown === true && rejectedUI.text.indexOf('dep_bad') >= 0,
+    rejectedUI.text);
+  check("拒绝原因里的 HTML 被转义（它同样来自不可信来源）",
+    rejectedUI.escaped === true,
+    JSON.stringify({ noEl: rejectedUI.noInjectedElement, literal: rejectedUI.literalInText }));
   // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
   check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
     csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));

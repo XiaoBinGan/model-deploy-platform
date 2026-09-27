@@ -85,6 +85,12 @@ function rawRequest(port, rawPath, method) {
   } = require("./probe");
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-server-test-"));
+  // Pre-seed a row that will be dropped on load (DESK-26), so the API outlet for
+  // `rejected` is exercised rather than asserted from an always-empty array.
+  fs.writeFileSync(path.join(dataDir, "deployments.json"), JSON.stringify({
+    seq: 1,
+    items: [{ id: "dep_bad", backend: "ollama", model_path: "--help", status: "STOPPED", log: [] }],
+  }));
   const s = await start(0, { dataDir });
   const base = s.url;
   console.log("desktop server:", base, "| upstream:", process.env.MDP_SERVICE);
@@ -312,6 +318,23 @@ function rawRequest(port, rawPath, method) {
   check("6 responses give 6 distinct nonces", nonces.size === 6, "distinct=" + nonces.size);
   check("/index.html is templated too, not served raw",
     !(await (await fetch(base + "index.html")).text()).includes("{{CSP_NONCE}}"));
+  // --- DESK-26: the rejected rows reach the window through the API -------------
+  // deploy.js records why a row was dropped. That is only worth anything if the
+  // window can actually see it, and the window reads this endpoint.
+  const deps = await (await fetch(base + "api/deployments")).json();
+  check("DESK-26 /api/deployments 带上了 rejected",
+    Array.isArray(deps.rejected), typeof deps.rejected);
+  check("DESK-26 被丢弃的行出现在 API 里，且带原因和原值",
+    deps.rejected.some((r) => r.id === "dep_bad" && r.reason && r.model_path === "--help"),
+    JSON.stringify(deps.rejected));
+  // _load() 和 _save() 的合并会各走一遍同样的磁盘行，很容易把同一条记两次。
+  check("DESK-26 同一条被拒绝的行只报告一次",
+    deps.rejected.filter((r) => r.id === "dep_bad").length === 1,
+    "count=" + deps.rejected.filter((r) => r.id === "dep_bad").length);
+  check("DESK-26 被丢弃的行不在正常部署列表里",
+    !(deps.deployments || []).some((d) => d.id === "dep_bad"),
+    JSON.stringify((deps.deployments || []).map((d) => d.id)));
+
   await s.close();
   upstream.server.closeAllConnections();
   upstream.server.close();

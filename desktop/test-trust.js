@@ -214,8 +214,21 @@ function hostileService(reply) {
     !d5.items.has("dep_evil") && d5.items.has("dep_ok"),
     [...d5.items.keys()].join(","));
   check("DESK-26 被丢弃的行留了原因，不是静默消失",
-    (d5._rejected || []).some((r) => r.id === "dep_evil"),
-    JSON.stringify(d5._rejected || []));
+    d5.rejected().some((r) => r.id === "dep_evil"),
+    JSON.stringify(d5.rejected()));
+  // 上一版只把原因存在 _rejected 里、没有任何出口，等于换了个方式的静默。
+  // 这两条盯的是「出口」本身：server 能取到、文件有备份。
+  check("DESK-26 rejected() 是公开出口（server 从这里取给 UI）",
+    Array.isArray(d5.rejected()) && d5.rejected().length === 1);
+  const bakPath = path.join(evilDir, "deployments.json.rejected.bak");
+  check("DESK-26 被丢弃的行先进了备份，没被下一次 _save 抹掉",
+    fs.existsSync(bakPath), fs.readdirSync(evilDir).join(","));
+  // 备份里必须还留着原始恶意值，否则这个「备份」没有意义。
+  const bak = fs.existsSync(bakPath)
+    ? JSON.parse(fs.readFileSync(bakPath, "utf8")) : { items: [] };
+  check("DESK-26 备份保留了原始恶意行",
+    (bak.items || []).some((i) => i.id === "dep_evil" && i.model_path === "--help"),
+    JSON.stringify((bak.items || []).map((i) => i.id + "=" + i.model_path)));
 
   // --- case 3: port validation ---
   const d3 = new Deployments(path.join(dir, "d3"), "");

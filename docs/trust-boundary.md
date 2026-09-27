@@ -223,7 +223,27 @@ DESK-01 修掉的是「服务端直接给 argv」。但还有一个**值**从控
 规则：长度上限 200；拒绝控制字符（NUL / 换行）；拒绝以 `-` 开头；
 `ollama` 后端额外要求匹配标签语法
 `[registry/][namespace/]name[:tag]`。
-被丢弃的行**留原因**（`_rejected`）而不是静默消失 —— 沿用 DESK-14 的教训。
+### 丢弃一行不等于可以悄无声息
+
+第一版只把原因存进 `_rejected`，**没有任何出口** —— 测试读得到，UI 读不到，
+等于换了个方式的静默。而且 `_load()` 不接收的行不进 `items`，下一次 `_save()`
+写的就是 `[...items.values()]`，坏行会被**直接从磁盘抹掉**，连备份都没有：
+正是 DESK-14 修过的那个失败模式，被我在同一个文件里又犯了一次。
+
+所以现在有三个出口，三个都测：
+
+1. `console.error` —— 立刻可见
+2. `rejected()` → `GET /api/deployments` 的 `rejected` 字段 → 页面横幅
+3. `deployments.json.rejected.bak` —— 在下一次 `_save()` 覆盖之前先备份，
+   备份里保留**原始恶意值**（备份要是丢掉了原值就没有意义）
+
+同一条被拒绝的行只报告一次：`_load()` 和 `_save()` 的合并会各走一遍同样的磁盘行，
+不去重的话页面会把一条坏行显示成两条，而且每存一次就多一条。
+
+live 端到端（真实的 `~/Library/Application Support/mdp-desktop/`）：手动塞入一行
+`model_path: "--malicious"`，重启后 API 返回那条 `rejected`、页面横幅显示
+「已移除 dep_tampered：模型标识不能以 - 开头（原值 --malicious）」、
+`deployments.json.rejected.bak` 生成、**原文件里的坏行仍然保留**（没有 save 就不删）。
 
 **必须说清楚：这只修了参数注入，还有一类没修。**
 
@@ -246,8 +266,8 @@ DESK-01 修掉的是「服务端直接给 argv」。但还有一个**值**从控
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_trust_boundary.py -q   # 19 passed
 cd backend && .venv/bin/python -m pytest tests/test_frontend_nonce.py -q   # 5 passed
-cd desktop && node test-trust.js                                          # 28 passed（含 13 条 DESK-26）
-cd desktop && node test-server.js                                         # 81 passed（含 5 条 nonce 断言）
+cd desktop && node test-trust.js                                          # 31 passed（含 16 条 DESK-26）
+cd desktop && node test-server.js                                         # 85 passed（含 5 条 nonce + 4 条 DESK-26 出口断言）
 ```
 
 前端侧另有 8 条 CSP / 注入断言在 `desktop/test-frontend.js`（真的在渲染进程里验证）。
