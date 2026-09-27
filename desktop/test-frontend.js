@@ -205,6 +205,15 @@ app.whenReady().then(async () => {
     macWarnText.t.indexOf('实测') >= 0 && macWarnText.t.indexOf('推断') >= 0,
     macWarnText.t.slice(0, 160));
 
+  // 警告不能只说「你的镜像不行」：CPU 路径是通的，还要给出实测可用的替代。
+  // 也**不能**再说「容器在 Mac 上不通」—— 真容器已经跑到能推理了。
+  check("macOS 警告给出实测可用的 CPU 镜像",
+    macWarnText.t.indexOf('ghcr.io/ggml-org/llama.cpp:server') >= 0,
+    macWarnText.t.slice(-70));
+  check("macOS 警告不再宣称「容器在 Mac 上不通」",
+    macWarnText.t.indexOf('容器这条路在 Mac 上不通') < 0,
+    macWarnText.t.slice(0, 70));
+
   // --- 预览必须和真正会执行的命令一致 -------------------------------------
   // advisory 预览以前自己拼请求、不带 docker 字段，于是它打印 --gpus all 和默认镜像，
   // 而真正部署用的是用户的选择 —— 告诉用户去复制的那条命令，不是这个应用会跑的命令。

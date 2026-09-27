@@ -399,8 +399,8 @@ function dockerGpuText(){
   var inst=(CONFIG&&CONFIG.installable)||{};
   var fromPlan=(un.vllm&&un.vllm.gpu)||(inst.vllm&&inst.vllm.gpu)||'';
   if(CONFIG&&CONFIG.local===true&&caps&&caps.platform==='darwin'){
-    return (fromPlan||'macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），容器这条路在 Mac 上不通。')
-      +' 容器只能跑 CPU 镜像，所以 GPU 参数已默认设为 none：实测 --gpus all 会直接报 could not select device driver，而且 Docker 是先拉完整个镜像才报错。像 vllm/vllm-openai 这类 CUDA 镜像预期也起不来（这一条是推断，没有跑完整个镜像验证），请换成 CPU 版本。';
+    return (fromPlan||'macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），所以容器跑不了需要显卡的镜像 —— 但容器本身能用，CPU 推理是通的。')
+      +' GPU 参数已默认设为 none：实测 --gpus all 会直接报 could not select device driver，而且 Docker 是先拉完整个镜像才报错。像 vllm/vllm-openai 这类 CUDA 镜像预期也起不来（这一条是推断，没有跑完整个镜像验证）。换成 CPU 镜像即可，实测可用的是 ghcr.io/ggml-org/llama.cpp:server。';
   }
   if(caps&&caps.docker===false){
     return '本机没有运行中的 Docker 守护进程，容器部署会失败：请先启动 Docker Desktop。';

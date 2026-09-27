@@ -35,12 +35,43 @@ linux aarch64 8 8217858048          # 8 核 / 8 GB，宿主有 10 核 / 24 GB
 |---|---|---|
 | Linux（+ nvidia-container-toolkit） | 能 | 能，GPU 直通 |
 | Windows（Docker Desktop，WSL2 后端） | 能 | 能，GPU 由 WSL2 直通 |
-| **macOS** | **不能** | **不能**；只有 CPU，速度不可用 |
+| **macOS** | **不能** | **不能**；但容器**能跑 CPU 推理**（见 §0.2），只是慢，且 CUDA 镜像起不来 |
 
 对应的代码：`desktop/installers.js` 的 `gpuPath()`。GPU 直通不是靠平台名猜的，
 而是 `_caps()` 实测出来的（`docker info` 通不通 + `nvidia-smi` 在不在）。
 桌面端**本地**拼 docker argv，控制面返回的 `command` 永远不被执行
 （见 `docs/trust-boundary.md`）。
+
+## 0.2 真实推理：已跑通的 CPU 配方（macOS 实测）
+
+§0.1 说明 macOS 容器拿不到 GPU。但「拿不到 GPU」不等于「容器这条路没用」——
+容器**可以**跑 CPU 推理。下面是实测跑通的配方，CPU 路径与
+「非 vllm/sglang 镜像走自带 CMD + extra_args」这条契约分支都由此验证：
+
+```bash
+# 1. 官方 llama.cpp server 镜像（1.18 GB）
+docker pull ghcr.io/ggml-org/llama.cpp:server
+
+# 2. 用应用的 docker 后端创建部署，字段如下：
+#    image      = ghcr.io/ggml-org/llama.cpp:server
+#    gpus       = none
+#    volumes    = [{ host: "~/.ollama/models/blobs", container: "/blobs", ro: true }]
+#    extra_args = ["-m", "/blobs/<gguf>", "--host", "0.0.0.0", "--port", "8080", "-c", "1024"]
+#    port       = 8094        （container_port 由镜像名推出 = 8080）
+```
+
+模型可以直接用 Ollama 已经下载好的 blob —— 那是标准 GGUF（魔数 `GGUF`、版本 3），
+不需要另外下一份。本机实测用的是 `qwen2.5:7b` 的 blob（4.68 GB）。
+
+实测结果：create → start → RUNNING → `health` 200 →
+`POST /v1/chat/completions` 200，返回真实回复。容器内日志可见 llama.cpp 真的
+加载了模型（`load_model: loading model '/blobs/sha256-...'`、`n_ctx_slot = 1024`）。
+
+关于 `-c 1024`：Docker Desktop 默认只给容器约 8 GB 内存，7B Q4 权重已占约 4.7 GB，
+上下文开大容易 OOM。这不是应用的限制，是容器的内存额度限制。
+
+**这条路径仍然没有 GPU**：它证明的是「CPU 推理可用」，不是「macOS 能跑 GPU 容器」。
+vLLM / SGLang 的官方镜像依旧是 CUDA 镜像，在 macOS 上仍然起不来。
 
 ## 1. 后端 id
 

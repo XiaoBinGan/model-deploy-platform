@@ -518,19 +518,27 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
   而 `curl https://get.docker.com | sh` 是管道执行，违反「argv 数组、不过 shell」的信任边界。
 - WSL2 检测读 `/proc/version`（而不是「有没有 `wsl` 命令」），避免把 WSL 的内存限额当宿主机内存。
 
-已经验证的（容器生命周期）：
+已经验证的（容器生命周期 + **真实推理**）：
 
-- 启动 Docker Desktop（4.38.0 / Docker 27.5.1）后，用应用真实跑通了
-  「拉镜像 → 启动容器 → `docker rm -f` 清理」：容器确实以 `mdp-<部署 id>` 为名、
-  按推导出的端口映射运行，删除后 `docker ps -a` 为空。
-  在此之前这部分只有假二进制测试（`desktop/test-docker.js`，89 项）。
+- **真实推理链路跑通了**。用应用的 docker 后端部署官方 llama.cpp server 镜像，
+  挂载本机一个真实的 4.7 GB GGUF（qwen2.5:7b），走完 create → start → RUNNING →
+  health 200 → `POST /v1/chat/completions` 200，模型返回了真实回复：
+  「我是运行在阿里云的大型语言模型平台上。」
+  整条 argv 由桌面端本地拼装（`extra_args` 传 `-m /blobs/... --host 0.0.0.0 --port 8080`），
+  控制面没有参与任何可执行内容。**这是 macOS 上的 CPU 路径**，也证明了
+  「非 vllm/sglang 镜像走自带 CMD + extra_args」这条契约分支真的可用。
+  复现命令见 `docs/docker-design.md` §0.2。
+- 用应用真实跑通了「拉镜像 → 启动容器 → `docker rm -f` 清理」：容器确实以
+  `mdp-<部署 id>` 为名、按推导出的端口映射运行，删除后 `docker ps -a` 为空。
 
 未验证的部分（不要当成已完成）：
 
 - **GPU 直通本身**：开发机是 macOS（Apple M5），没有 NVIDIA 显卡，
   容器根本拿不到 GPU，所以「`--gpus all` 在 Linux/Windows 上真的生效」只在文档与
-  `gpuPath()` 的说明里，**没有在真机跑过**。
-- **真实推理镜像**：没有跑过 `vllm/vllm-openai`，只跑过 `nginx:alpine` 验证容器生命周期。
+  `gpuPath()` 的说明里，**没有在真机跑过**。上面跑通的是 CPU 路径。
+- **CUDA 推理镜像**：`vllm/vllm-openai` / `lmsysorg/sglang` 仍然**没有跑过**。
+  它们需要 GPU 直通，而本机没有，所以「一键拉取这两个镜像之后能不能真的起来」
+  依旧未验证 —— 包括在 Linux/Windows 上。
 - Windows nsis 安装包配置已写，但**没有在 Windows 上构建或运行过**。
 
 ---
@@ -639,6 +647,6 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 
 | # | 项目 | 现状 |
 |---|---|---|
-| T1 | Docker **真实容器集成** | 🟡 部分完成。容器生命周期已用真容器验证（见下），但**没有 GPU 直通**，也没有跑过真的推理镜像 |
+| T1 | Docker **真实容器集成** | 🟡 大部分完成。容器生命周期**与真实推理**都已在 macOS 上用真容器验证（real llama.cpp server + 4.7 GB GGUF，见 Phase 6）；**GPU 直通**与 CUDA 镜像（vLLM/SGLang）仍未验证 |
 | T2 | macOS 打包产物公证（notarization） | 未做。`npx electron-builder --dir --mac` 能构建，代码签名自动跳过 |
 
