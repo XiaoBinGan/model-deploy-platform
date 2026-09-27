@@ -172,6 +172,26 @@ async function installPlan(name, ctx) {
     // backend. Measured, not assumed - see the darwin branch below for what
     // the same command does on a Mac.
     if (docker && nvidia && (platform === "linux" || platform === "win32")) {
+      const how = gpu + (platform === "win32"
+        ? "（容器跑在 WSL2 后端里，GPU 由 Docker Desktop 直通）"
+        : "（需要 nvidia-container-toolkit）");
+      // The image may already be local from an earlier install. Re-pulling is a
+      // no-op but it re-downloads manifest layers, so say plainly that there is
+      // nothing left to do and point at the backend that actually runs it.
+      if (ctx.images && ctx.images[name]) {
+        return {
+          ok: true,
+          backend: name,
+          steps: [],
+          manual: "docker pull " + image,
+          via: "docker",
+          image,
+          alreadyInstalled: true,
+          note: "官方镜像 " + image + " 已在本地，无需重新拉取。部署请用 docker 后端" +
+            "（镜像已预填为该镜像，端口与启动参数会自动按镜像名推导）。",
+          gpu: how,
+        };
+      }
       const steps = [{
         note: "拉取官方镜像 " + image + "（只有一个步骤，拉完就能部署）",
         argv: ["docker", "pull", image],
@@ -183,9 +203,8 @@ async function installPlan(name, ctx) {
         manual: manual(steps),
         via: "docker",
         image,
-        gpu: gpu + (platform === "win32"
-          ? "（容器跑在 WSL2 后端里，GPU 由 Docker Desktop 直通）"
-          : "（需要 nvidia-container-toolkit）"),
+        note: "拉完后用 docker 后端部署（镜像已预填为该镜像）。",
+        gpu: how,
       };
     }
 

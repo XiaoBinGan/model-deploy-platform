@@ -4,7 +4,7 @@ const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { installPlan, BACKEND_INFO, gpuPath } = require("./installers");
+const { installPlan, BACKEND_INFO, gpuPath, OFFICIAL_IMAGE } = require("./installers");
 
 const OLLAMA_BASE = "http://127.0.0.1:11434";
 const OLLAMA_PORT = 11434;
@@ -35,6 +35,9 @@ const MAX_VOLUMES = 8;
 const MAX_EXTRA_ARGS = 32;
 const MAX_EXTRA_ARG_LEN = 200;
 const DOCKER_REMOVE_TIMEOUT_MS = 15000;
+// `docker image inspect` is a local metadata read; if it has not answered in a
+// few seconds the daemon is wedged and waiting longer only delays the UI.
+const DOCKER_PROBE_TIMEOUT_MS = 8000;
 const HAS_BINARY_TIMEOUT_MS = 8000;
 
 // Every backend the UI can show, so the ones this machine cannot run still get
@@ -322,6 +325,12 @@ class Deployments {
           steps: plan.steps.map((s) => s.note),
           manual: plan.manual,
           gpu: plan.gpu || "",
+          // Present only for the docker route: lets the UI say "已经拉好了"
+          // instead of showing the same install offer again.
+          via: plan.via || "",
+          image: plan.image || "",
+          alreadyInstalled: !!plan.alreadyInstalled,
+          note: plan.note || "",
         };
       } else {
         unavailable[name] = {
@@ -381,6 +390,29 @@ class Deployments {
     });
   }
 
+  // Is the image already pulled? "install vLLM via Docker" is one `docker pull`,
+  // so after the first install the UI must be able to say "already local" instead
+  // of offering the same download again. `docker image inspect` exits non-zero when
+  // the image is absent, which is the normal case and not an error.
+  _dockerImagePresent(image) {
+    return new Promise((resolve) => {
+      if (!image) return resolve(false);
+      let child;
+      try {
+        child = execFile(
+          "docker",
+          ["image", "inspect", image, "--format", "{{.Id}}"],
+          { timeout: DOCKER_PROBE_TIMEOUT_MS },
+          (err, stdout) => resolve(!err && String(stdout || "").trim().length > 0)
+        );
+      } catch (e) {
+        resolve(false);
+        return;
+      }
+      if (child && child.on) child.on("error", () => resolve(false));
+    });
+  }
+
   _hfCachePath() {
     // os.homedir() already resolves to USERPROFILE on Windows, so the same
     // relative path is right on every platform.
@@ -430,12 +462,22 @@ class Deployments {
   }
 
   async _installCtx() {
+    const caps = await this._caps();
+    // Only probe when a container could actually run the image; on a machine
+    // without a live daemon every probe would be a guaranteed miss.
+    const images = {};
+    if (caps.docker) {
+      for (const name of Object.keys(OFFICIAL_IMAGE)) {
+        images[name] = await this._dockerImagePresent(OFFICIAL_IMAGE[name]);
+      }
+    }
     return {
       platform: process.platform,
       arch: process.arch,
       home: os.homedir(),
       has: hasBinary,
-      caps: await this._caps(),
+      caps,
+      images,
     };
   }
 
@@ -462,7 +504,11 @@ class Deployments {
       return res.end();
     }
 
-    emit({ type: "plan", backend: name, steps: plan.steps.map((s) => s.note), manual: plan.manual });
+    emit({
+      type: "plan", backend: name, steps: plan.steps.map((s) => s.note), manual: plan.manual,
+      via: plan.via || "", image: plan.image || "",
+      alreadyInstalled: !!plan.alreadyInstalled, note: plan.note || "",
+    });
     for (let i = 0; i < plan.steps.length; i += 1) {
       const step = plan.steps[i];
       emit({ type: "step", index: i, note: step.note, command: step.argv.join(" ") });
@@ -475,7 +521,10 @@ class Deployments {
 
     // Re-probe so the entry turns selectable without a manual refresh.
     const after = await this.detectBackends();
-    emit({ type: "done", ok: true, backends: after.backends, installable: after.installable });
+    emit({
+      type: "done", ok: true, backends: after.backends, installable: after.installable,
+      alreadyInstalled: !!plan.alreadyInstalled,
+    });
     res.end();
   }
 

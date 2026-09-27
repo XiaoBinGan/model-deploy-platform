@@ -237,6 +237,36 @@ const allTools = () => Promise.resolve(true);
     check("镜像名是本地常量，且与 docker 后端的默认镜像一致",
       OFFICIAL_IMAGE.vllm === "vllm/vllm-openai:latest" && OFFICIAL_IMAGE.sglang === "lmsysorg/sglang:latest",
       JSON.stringify(OFFICIAL_IMAGE));
+
+    // 镜像已经在本地时不能再让用户拉一遍，而且必须说清楚接下来怎么部署。
+    // 安装向导的最后一环以前是断的：拉完镜像，界面既不说"好了"，也不指向
+    // 真正能跑它的后端。
+    const ctxWith = (platform, docker, nvidia, images) => ({
+      platform, arch: "x86_64", home: "/h", has: allTools,
+      caps: { platform, docker, nvidia }, images,
+    });
+
+    const freshPull = await installPlan("vllm", ctxWith("linux", true, true, {}));
+    check("镜像不在本地：给出一个 docker pull 步骤",
+      freshPull.ok && freshPull.steps.length === 1 && !freshPull.alreadyInstalled,
+      "steps=" + freshPull.steps.length);
+
+    const already = await installPlan("vllm", ctxWith("linux", true, true, { vllm: true }));
+    check("镜像已在本地：不再给拉取步骤，并标记 alreadyInstalled",
+      already.ok && already.steps.length === 0 && already.alreadyInstalled === true,
+      "steps=" + already.steps.length + " alreadyInstalled=" + already.alreadyInstalled);
+    check("镜像已在本地：说明指向 docker 后端，而不是只说「完成了」",
+      typeof already.note === "string" && already.note.indexOf("docker 后端") >= 0,
+      already.note);
+
+    const onlyVllm = await installPlan("sglang", ctxWith("linux", true, true, { vllm: true }));
+    check("只拉了 vllm 镜像时 sglang 仍要拉自己的",
+      onlyVllm.steps.length === 1 && !onlyVllm.alreadyInstalled,
+      "steps=" + onlyVllm.steps.length);
+
+    const macLocal = await installPlan("vllm", ctxWith("darwin", true, false, { vllm: true }));
+    check("macOS：镜像就算已在本地也仍然拒绝（有镜像不等于有 GPU）",
+      !macLocal.ok && macLocal.kind === "platform", macLocal.ok ? "竟然 ok" : macLocal.kind);
   }
 
   fs.rmSync(dir, { recursive: true, force: true });
