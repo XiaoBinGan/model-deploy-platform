@@ -467,9 +467,13 @@ class Deployments {
     // without a live daemon every probe would be a guaranteed miss.
     const images = {};
     if (caps.docker) {
-      for (const name of Object.keys(OFFICIAL_IMAGE)) {
-        images[name] = await this._dockerImagePresent(OFFICIAL_IMAGE[name]);
-      }
+      // Probed in parallel: sequentially, two wedged daemon calls would stack
+      // two 8s timeouts on an endpoint the window calls at startup.
+      const names = Object.keys(OFFICIAL_IMAGE);
+      const found = await Promise.all(
+        names.map((n) => this._dockerImagePresent(OFFICIAL_IMAGE[n]))
+      );
+      names.forEach((n, i) => { images[n] = found[i]; });
     }
     return {
       platform: process.platform,
