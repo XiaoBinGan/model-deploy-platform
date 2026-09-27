@@ -124,6 +124,36 @@ app.whenReady().then(async () => {
   check("CSP 限制 connect-src 为同源", /'self'/.test(csp.c) && /connect-src/.test(csp.c), csp.c.slice(0, 80));
   check("CSP 真的在生效（eval 被拒）", csp.evalBlocked === true);
   check("CSP 没有把同源请求一起挡掉", csp.sameOk === true);
+
+  // 断言 CSP 到底挡了什么。注意这里断言的是 **violation 事件**，不是 onerror ——
+  // 没有网络时远程脚本也会 onerror，那样测试会因为错误的原因通过。
+  const inject = await run(`(async () => {
+    const v = [];
+    document.addEventListener('securitypolicyviolation', (e) => {
+      v.push(String(e.violatedDirective || ''));
+    });
+    // 内联注入：CSP 里有 unsafe-inline，预期会执行（已知弱点，不是回归）
+    const s1 = document.createElement('script');
+    s1.textContent = 'window.__INL = true;';
+    document.head.appendChild(s1);
+    const inlineRan = window.__INL === true;
+    // 外部注入：应当被 script-src-elem 拦下并产生 violation
+    await new Promise((resolve) => {
+      const s2 = document.createElement('script');
+      s2.src = 'https://example.com/evil.js';
+      s2.onload = resolve; s2.onerror = resolve;
+      document.head.appendChild(s2);
+      setTimeout(resolve, 1500);
+    });
+    return { inlineRan, violations: v };
+  })()`);
+  check("CSP 拦下注入的外部脚本（按 violation 事件判定）",
+    inject.violations.some((d) => d.indexOf('script-src') >= 0),
+    JSON.stringify(inject.violations));
+  // 这条不是「应该通过」，是**记录已知边界**：unsafe-inline 让内联注入照样执行。
+  // 如果哪天有人把内联事件处理器清干净了，这条会变成 false，正好提醒去收紧 CSP。
+  check("记录已知边界：内联注入目前仍会执行（不是回归，是 unsafe-inline 的代价）",
+    inject.inlineRan === true, String(inject.inlineRan));
   // console.warn 在 meta 里是无效指令，写上去只会假装有保护。
   check("CSP 没有写 meta 里无效的指令（frame-ancestors / sandbox）",
     csp.c.indexOf('frame-ancestors') < 0 && csp.c.indexOf('sandbox') < 0, csp.c.slice(0, 80));

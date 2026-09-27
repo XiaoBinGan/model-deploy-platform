@@ -121,6 +121,16 @@ object-src 'none'; base-uri 'none'; form-action 'none'
 实测（在真实渲染进程里，不是读字符串）：`fetch('https://example.com')` 被拒，
 同源 `/api/health` 正常，`eval` 被拒（因为脚本源没有 `unsafe-eval`）。
 
+**往页面里注入脚本的实测结果**（这组数字说明 CSP 到底挡了什么、没挡什么）：
+
+| 注入内容 | 结果 | 触发 |
+|---|---|---|
+| 外部 `<script src="https://example.com/evil.js">` | **被拦** | `script-src-elem` 违规事件 |
+| 内联 `<script>window.__INLINE_OK = true</script>` | **执行了** | 无（`'unsafe-inline'` 放行） |
+
+所以这条 CSP 的真实边界是：**挡住外部来源，挡不住内联注入**。
+不要把它当成 XSS 防护 —— 防注入仍然只有 `esc()` / `badge()` / `textContent` 这一层。
+
 ---
 
 ## 测试
