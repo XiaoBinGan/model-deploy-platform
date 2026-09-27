@@ -133,6 +133,54 @@ app.whenReady().then(async () => {
   })()`);
   check("非 macOS 不显示 Mac 专属警告", noWarn.shown === false);
 
+  // --- GPU 默认值必须匹配这台机器 ---------------------------------------
+  // 默认请求 `--gpus all` 在拿不到 GPU 的机器上不只是无用：Docker 会先把整个
+  // 镜像拉下来，然后才报 could not select device driver —— 用户白等一次多 GB 下载。
+  const gpuDefault = await run(`(() => {
+    window.CONFIG = { backends: ['docker', 'ollama'], installable: {}, unavailable: {}, local: true,
+      caps: { platform: 'darwin', docker: true, nvidia: false } };
+    fillBackends();
+    const b = document.getElementById('d-backend');
+    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    const g = document.getElementById('d-gpus');
+    g.removeAttribute('data-touched');
+    updateDockerBlock();
+    const mac = g.value;
+    window.CONFIG.caps = { platform: 'linux', docker: true, nvidia: true };
+    g.removeAttribute('data-touched');
+    updateDockerBlock();
+    const linux = g.value;
+    g.value = 'none'; g.setAttribute('data-touched', '1');
+    updateDockerBlock();
+    const kept = g.value;
+    g.removeAttribute('data-touched');
+    window.CONFIG.caps = { platform: 'darwin', docker: true, nvidia: false };
+    return { mac, linux, kept, hasTouchedAttr: document.getElementById('d-gpus').getAttribute('onchange') !== null };
+  })()`);
+  check("macOS 上 GPU 默认 none（all 在这里必然失败）", gpuDefault.mac === 'none', gpuDefault.mac);
+  check("Linux + NVIDIA 上 GPU 默认 all", gpuDefault.linux === 'all', gpuDefault.linux);
+  check("用户显式改过之后不再被覆盖", gpuDefault.kept === 'none', gpuDefault.kept);
+  check("GPU 控件带 onchange 以便记录用户的选择", gpuDefault.hasTouchedAttr === true);
+
+  // macOS 的警告必须说清楚「默认镜像在这里起不来」，否则用户会照着默认值点下去。
+  const macWarnText = await run(`(() => {
+    window.CONFIG = { backends: ['docker', 'ollama'], installable: {}, unavailable: {}, local: true,
+      caps: { platform: 'darwin', docker: true, nvidia: false } };
+    fillBackends();
+    const b = document.getElementById('d-backend');
+    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    const t = document.getElementById('d-docker-warn').textContent;
+    return { t };
+  })()`);
+  check("macOS 警告点名 vllm/vllm-openai 并给出实测依据",
+    macWarnText.t.indexOf('vllm/vllm-openai') >= 0 && /could not select device driver/.test(macWarnText.t),
+    macWarnText.t.slice(0, 120));
+  // 实测过的（--gpus all 报错）和推断的（CUDA 镜像起不来）必须分开说，
+  // 否则和这个分支一直以来的毛病一样：把假设写成事实。
+  check("macOS 警告把「推断」和「实测」分开标注",
+    macWarnText.t.indexOf('实测') >= 0 && macWarnText.t.indexOf('推断') >= 0,
+    macWarnText.t.slice(0, 160));
+
   // --- a pulled Docker image must read as ready, not as "install again" ------
   // The one-click install chain used to end nowhere: after `docker pull` the UI
   // still showed the same install offer, with no sign the image was local and no

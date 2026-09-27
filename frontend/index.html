@@ -125,7 +125,7 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="field wide" id="d-docker" style="display:none">
       <div class="form">
         <div class="field"><label for="d-image">镜像</label><input id="d-image" type="text" value="vllm/vllm-openai:latest" spellcheck="false"></div>
-        <div class="field"><label for="d-gpus">GPU</label><select id="d-gpus">
+        <div class="field"><label for="d-gpus">GPU</label><select id="d-gpus" onchange="this.setAttribute('data-touched','1')">
           <option value="all">all</option><option value="none">none</option>
           <option value="0">0</option><option value="0,1">0,1</option></select></div>
         <div class="field wide"><label for="d-volumes">数据卷（每行 host:container[:ro]，绝对路径）</label><textarea id="d-volumes" rows="2" placeholder="/Users/me/models:/models:ro"></textarea></div>
@@ -391,18 +391,33 @@ function dockerGpuText(){
   var inst=(CONFIG&&CONFIG.installable)||{};
   var fromPlan=(un.vllm&&un.vllm.gpu)||(inst.vllm&&inst.vllm.gpu)||'';
   if(CONFIG&&CONFIG.local===true&&caps&&caps.platform==='darwin'){
-    return fromPlan||'macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），容器这条路在 Mac 上不通。';
+    return (fromPlan||'macOS 上 Docker 也拿不到 GPU（Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供），容器这条路在 Mac 上不通。')
+      +' 容器只能跑 CPU 镜像，所以 GPU 参数已默认设为 none：实测 --gpus all 会直接报 could not select device driver，而且 Docker 是先拉完整个镜像才报错。像 vllm/vllm-openai 这类 CUDA 镜像预期也起不来（这一条是推断，没有跑完整个镜像验证），请换成 CPU 版本。';
   }
   if(caps&&caps.docker===false){
     return '本机没有运行中的 Docker 守护进程，容器部署会失败：请先启动 Docker Desktop。';
   }
   return '';
 }
+// Requesting every GPU on a machine that cannot pass one to a container is not
+// merely useless: Docker resolves the image first, so `--gpus all` costs the
+// user a multi-GB pull *before* it fails with "could not select device driver"
+// (measured on macOS). The contract default stays "all" - a GPU machine wants
+// that - but the control must start at a value that can actually work here.
+function syncDockerGpus(){
+  var sel=document.getElementById('d-gpus');
+  if(!sel){return;}
+  if(sel.getAttribute('data-touched')==='1'){return;}
+  var caps=(CONFIG&&CONFIG.caps)||{};
+  var canPass=(caps.platform!=='darwin')&&caps.nvidia===true;
+  sel.value=canPass?'all':'none';
+}
 function updateDockerBlock(){
   var block=document.getElementById('d-docker');
   if(!block){return;}
   var backend=document.getElementById('d-backend').value;
   block.style.display=backend==='docker'?'':'none';
+  syncDockerGpus();
   var warn=document.getElementById('d-docker-warn');
   if(warn){
     var text=backend==='docker'?dockerGpuText():'';
