@@ -181,6 +181,42 @@ app.whenReady().then(async () => {
     macWarnText.t.indexOf('实测') >= 0 && macWarnText.t.indexOf('推断') >= 0,
     macWarnText.t.slice(0, 160));
 
+  // --- 预览必须和真正会执行的命令一致 -------------------------------------
+  // advisory 预览以前自己拼请求、不带 docker 字段，于是它打印 --gpus all 和默认镜像，
+  // 而真正部署用的是用户的选择 —— 告诉用户去复制的那条命令，不是这个应用会跑的命令。
+  const adv = await run(`(async () => {
+    window.__CAP.length = 0;
+    window.CONFIG = { backends: ['docker', 'ollama'], installable: {}, unavailable: {}, local: true,
+      allow_remote_deploy: false, caps: { platform: 'darwin', docker: true, nvidia: false } };
+    LAST = { client_is_local: false };
+    fillBackends();
+    const b = document.getElementById('d-backend');
+    b.value = 'docker'; b.dispatchEvent(new Event('change'));
+    updateDockerBlock();
+    document.getElementById('d-image').value = 'my/cpu-image:1';
+    document.getElementById('d-volumes').value = '/tmp/models:/models:ro';
+    document.getElementById('d-extra').value = '--max-model-len' + String.fromCharCode(10) + '4096';
+    await refreshAdvisory();
+    const p = window.__CAP.filter(c => c.url === '/api/plans/preview').pop();
+    return { sent: p ? JSON.parse(p.body) : null, shown: document.getElementById('d-gpus').value };
+  })()`);
+  check("advisory 预览发出用户选的 GPU（不再写死 all）",
+    !!adv.sent && adv.sent.gpus === 'none', adv.sent && adv.sent.gpus);
+  check("advisory 预览发出用户填的镜像",
+    !!adv.sent && adv.sent.image === 'my/cpu-image:1', adv.sent && adv.sent.image);
+  check("advisory 预览发出数据卷",
+    !!adv.sent && (adv.sent.volumes || []).length === 1, JSON.stringify(adv.sent && adv.sent.volumes));
+  check("advisory 预览发出额外参数",
+    !!adv.sent && (adv.sent.extra_args || []).length === 2, JSON.stringify(adv.sent && adv.sent.extra_args));
+  // 真正部署时两边必须用同一份字段：同一个函数产出的值。
+  const sameFields = await run(`(() => {
+    const df = dockerFields();
+    return { image: df.image, gpus: df.gpus, volumes: df.volumes.length, extra: df.extra_args.length, errs: df.errors.length };
+  })()`);
+  check("dockerFields() 与预览/部署共用同一份值",
+    sameFields.image === 'my/cpu-image:1' && sameFields.gpus === 'none' && sameFields.volumes === 1 && sameFields.extra === 2,
+    JSON.stringify(sameFields));
+
   // --- a pulled Docker image must read as ready, not as "install again" ------
   // The one-click install chain used to end nowhere: after `docker pull` the UI
   // still showed the same install offer, with no sign the image was local and no
@@ -319,6 +355,54 @@ app.whenReady().then(async () => {
   check("docker 请求体 extra_args 按行解析（保留带空格参数）",
     !!dockerBody && JSON.stringify(dockerBody.extra_args) === JSON.stringify(["--max-model-len", "65536", "--served-model-name My Model"]),
     dockerBody && JSON.stringify(dockerBody.extra_args));
+
+  // 校验被搬进 dockerFields() 之后，必须仍然真的拦得住。
+  const badImage = await run(`(async () => {
+    document.getElementById('d-image').value = 'evil; rm -rf /';
+    window.__CAP.length = 0;
+    await createDeploy();
+    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+      log: document.getElementById('d-log').textContent };
+  })()`);
+  check("非法镜像名提交前被拦", badImage.posted === false && badImage.log.indexOf('镜像') >= 0, badImage.log.slice(0, 40));
+
+  const tooManyVols = await run(`(async () => {
+    document.getElementById('d-image').value = 'ok/image:1';
+    document.getElementById('d-volumes').value = Array.from({ length: 9 }, (_, i) => '/h' + i + ':/c' + i).join(String.fromCharCode(10));
+    window.__CAP.length = 0;
+    await createDeploy();
+    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+      log: document.getElementById('d-log').textContent };
+  })()`);
+  check("数据卷超过 8 条提交前被拦", tooManyVols.posted === false && tooManyVols.log.indexOf('8 条') >= 0, tooManyVols.log.slice(0, 40));
+
+  const tooManyArgs = await run(`(async () => {
+    document.getElementById('d-volumes').value = '';
+    document.getElementById('d-extra').value = Array.from({ length: 33 }, (_, i) => '--a' + i).join(String.fromCharCode(10));
+    window.__CAP.length = 0;
+    await createDeploy();
+    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+      log: document.getElementById('d-log').textContent };
+  })()`);
+  check("额外参数超过 32 项提交前被拦", tooManyArgs.posted === false && tooManyArgs.log.indexOf('32 项') >= 0, tooManyArgs.log.slice(0, 40));
+
+  const nonAbsVol = await run(`(async () => {
+    document.getElementById('d-extra').value = '';
+    document.getElementById('d-volumes').value = 'relative:/x';
+    window.__CAP.length = 0;
+    await createDeploy();
+    return { posted: window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST'),
+      log: document.getElementById('d-log').textContent };
+  })()`);
+  check("数据卷非绝对路径提交前被拦", nonAbsVol.posted === false && nonAbsVol.log.indexOf('绝对路径') >= 0, nonAbsVol.log.slice(0, 40));
+
+  const goodAgain = await run(`(async () => {
+    document.getElementById('d-volumes').value = '';
+    window.__CAP.length = 0;
+    await createDeploy();
+    return window.__CAP.some((c) => c.url === '/api/deployments' && c.method === 'POST');
+  })()`);
+  check("清理掉非法值之后又能提交（拦截没有卡死表单）", goodAgain === true);
 
   const nonDocker = await run(`(async () => {
     const sel = document.getElementById('d-backend');

@@ -825,9 +825,13 @@ async function refreshAdvisory(){
     document.getElementById('deploy-sub').textContent='共享服务下只能检索；请在本机执行命令。';
     var m=currentModel();
     try{
-      var d=await (await fetch('/api/plans/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-        model_id:m?m.id:'custom',model_path:document.getElementById('d-path').value,
-        backend:document.getElementById('d-backend').value,port:+document.getElementById('d-port').value,hardware:PROFILE})})).json();
+      var pbody={model_id:m?m.id:'custom',model_path:document.getElementById('d-path').value,
+        backend:document.getElementById('d-backend').value,port:+document.getElementById('d-port').value,hardware:PROFILE};
+      if(pbody.backend==='docker'){
+        var pdf=dockerFields();
+        pbody.image=pdf.image;pbody.gpus=pdf.gpus;pbody.volumes=pdf.volumes;pbody.extra_args=pdf.extra_args;
+      }
+      var d=await (await fetch('/api/plans/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(pbody)})).json();
       document.getElementById('advisory-cmd').textContent=d.command_string;
     }catch(e){}
   } else {
@@ -905,6 +909,24 @@ async function depDelete(id){
   }catch(e){document.getElementById('d-log').textContent='删除失败：'+e;}
   refreshDeployments();
 }
+// The single source of truth for the docker fields. The advisory preview used
+// to build its own request without them, so it printed `--gpus all` and the
+// default image while the actual deploy sent the user's choices: the command
+// the user was told to copy was not the command this app would run.
+function dockerFields(){
+  var v=parseVolumes(document.getElementById('d-volumes').value);
+  var e=parseExtraArgs(document.getElementById('d-extra').value);
+  var image=document.getElementById('d-image').value.trim()||'vllm/vllm-openai:latest';
+  var gpus=document.getElementById('d-gpus').value||'all';
+  var errors=[];
+  if(!validImage(image)){errors.push('镜像名不合法（不允许空白、引号、分号、$、反引号等）：'+image);}
+  if(!validGpus(gpus)){errors.push('GPU 选择不合法：'+gpus);}
+  if(v.errors.length){errors.push('数据卷格式不对（每行 host:container[:ro]，host 与 container 必须是绝对路径）：'+v.errors.join('；'));}
+  if(v.volumes.length>8){errors.push('数据卷最多 8 条。');}
+  if(e.errors.length){errors.push('额外参数每项不能超过 200 字符：'+e.errors.join('；'));}
+  if(e.args.length>32){errors.push('额外参数最多 32 项。');}
+  return {image:image,gpus:gpus,volumes:v.volumes,extra_args:e.args,errors:errors};
+}
 async function createDeploy(){
   var m=currentModel();
   var backend=document.getElementById('d-backend').value;
@@ -917,20 +939,12 @@ async function createDeploy(){
   // The docker fields are only meaningful for backend === "docker"; other
   // backends must not receive them (contract §2).
   if(backend==='docker'){
-    var v=parseVolumes(document.getElementById('d-volumes').value);
-    var e=parseExtraArgs(document.getElementById('d-extra').value);
-    var image=document.getElementById('d-image').value.trim()||'vllm/vllm-openai:latest';
-    var gpus=document.getElementById('d-gpus').value||'all';
-    if(!validImage(image)){log.textContent='镜像名不合法（不允许空白、引号、分号、$、反引号等）：'+image;return;}
-    if(!validGpus(gpus)){log.textContent='GPU 选择不合法：'+gpus;return;}
-    if(v.errors.length){log.textContent='数据卷格式不对（每行 host:container[:ro]，host 与 container 必须是绝对路径）：'+v.errors.join('；');return;}
-    if(v.volumes.length>8){log.textContent='数据卷最多 8 条。';return;}
-    if(e.errors.length){log.textContent='额外参数每项不能超过 200 字符：'+e.errors.join('；');return;}
-    if(e.args.length>32){log.textContent='额外参数最多 32 项。';return;}
-    body.image=image;
-    body.gpus=gpus;
-    body.volumes=v.volumes;
-    body.extra_args=e.args;
+    var df=dockerFields();
+    if(df.errors.length){log.textContent=df.errors[0];return;}
+    body.image=df.image;
+    body.gpus=df.gpus;
+    body.volumes=df.volumes;
+    body.extra_args=df.extra_args;
   }
   try{
     var r=await fetch('/api/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
