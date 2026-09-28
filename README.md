@@ -116,7 +116,7 @@ flowchart TB
 | 模式 | 适用场景 | 状态 |
 |------|---------|------|
 | 本地进程 | Linux / 已装推理环境 | ✅ Transformers 已验证 |
-| Docker | Windows + WSL2 / 生产 | 🟡 已实现（契约见 `docs/docker-design.md`），未做真实容器集成测试 |
+| Docker | Windows + WSL2 / 生产 | 🟡 已实现（契约见 `docs/docker-design.md`）。容器生命周期**与真实推理**已在 macOS 上用真容器验证；**GPU 直通**与 CUDA 镜像未验证（见 T1） |
 | WSL2 | Windows + Linux 推理 | 🟡 已识别 WSL2（读 `/proc/version`），未在真机验证 |
 
 ### 量化策略
@@ -485,8 +485,31 @@ python scripts/smoke_test.py
 vLLM / SGLang 官方只发 `manylinux` 的 x86_64 / aarch64 wheel，没有 macOS 版本，
 源码又依赖 CUDA / ROCm 内核，在 macOS 上编译不过。
 
-Mac 上真正对标 vLLM 的是 MLX，**已实现并做过真实端到端验证**
-（`desktop/deploy.js` 的 `_runMlx`，走 `mlx_lm.server`）。
+Mac 上真正对标 vLLM 的是 MLX，已实现并**做过真实端到端验证**（`desktop/deploy.js`
+的 `_runMlx`，走 `mlx_lm.server`）。
+
+验证条件与结果（Apple M5）：`mlx-lm 0.31.3` / `mlx 0.32.2`，`mx.metal.is_available()`
+为 `True`；权重 `mlx-community/Qwen2.5-0.5B-Instruct-4bit`（4-bit）。走应用自己的
+`_runMlx`，实际 argv 是：
+
+```
+~/.mdp-mlx/bin/python -m mlx_lm server \
+  --model mlx-community/Qwen2.5-0.5B-Instruct-4bit --host 127.0.0.1 --port <port>
+```
+
+`/health` 200 → `/v1/chat/completions` 200（1.1s，返回真实生成文本）→ stop 后子进程确实
+不存在。**没有传** `--kv-bits`：0.31.3 的 `--help` 里没有这个选项（与已知事实一致），
+传了会以 exit code 2 退出。
+
+**未验证**：`--kv-bits` 分支需要有该选项的新版 mlx-lm（本机装的没有）；Intel Mac
+（MLX 只在 Apple Silicon 上可用）。
+
+> **一个必须知道的陷阱**：`mlx_lm.server` 在权重存在**之前**就绑定端口，`/health` 由
+> 「生成线程活着」支撑，所以首次部署时它会一边下载一边答 200。此时直接发补全会
+> **永久挂起且不报错**（实测 180s 超时，服务端日志里连这条请求都没有）。
+> 桌面端已经补偿了这一点：它不把 `/health` 200 当作 RUNNING，而是发一个 1-token 补全
+> **逼出真实加载**，等到真应答才报 RUNNING；30 分钟装不下才判 FAILED，并且每 30 秒
+> 写一条「仍在加载权重…已等待 Ns」。见 `deploy.js` 的 `_warmup()`。
 Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 
 ### Phase 6 — Docker / WSL2 🟡
@@ -545,6 +568,10 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 
 ## 八、验收标准
 
+> **下表是原作者在另一台机器（Windows + RTX 5090）上的验收记录，不是 macOS 的证据。**
+> 其中「Ollama / Transformers 真实部署」那两行的 ✅ 来自那台 CUDA 机器。
+> macOS（Apple M5）上的复核结果单列在下方，「本机」一列指 macOS。
+
 | 验收项 | 状态 | 说明 |
 |--------|------|------|
 | 平台启动 | ✅ PASS | `uvicorn` 正常启动，监听 8790 |
@@ -562,6 +589,18 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 | 模型下载 | 🚫 BLOCKED | HF_HUB_OFFLINE 限制 |
 | 单元测试 | ✅ PASS | 4 passed |
 | 冒烟测试 | ✅ PASS | SMOKE PASS |
+
+### macOS（Apple M5）上的复核
+
+| 验收项 | 状态 | 说明 |
+|--------|------|------|
+| 硬件探测 | ✅ 本机实测 | `sysctl` 统一内存；`Apple M5 / arm64 / 10 cores / 24 GB / uma:true` |
+| Ollama 真实部署 | ✅ 本机实测 | `qwen3.5:9b` → RUNNING → `/health` 200 → `/v1/chat/completions` 200，返回真实文本 |
+| MLX 真实部署 | ✅ 本机实测 | `mlx-lm 0.31.3`（Metal 可用）+ 4-bit 权重，走 `_runMlx`，真实补全 |
+| thinking 模型空回复 | ✅ 本机实测 | 截断时回退到 `reasoning` 并给出提示，不再是空白 |
+| Docker 真实推理 | ✅ 本机实测 | 真 llama.cpp 容器 + 4.7 GB GGUF → 补全 200（CPU，无 GPU） |
+| Docker GPU 直通 | 🚫 无法验证 | macOS 容器是 Linux 虚拟机且拿不到 GPU |
+| vLLM / SGLang 原生 | 🚫 不可能 | 官方不发 macOS wheel |
 
 ### 不允许冒充完成的项
 
