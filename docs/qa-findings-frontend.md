@@ -591,3 +591,91 @@ async function refresh(){
 占位符计数用的是 `split()`，**分不清真占位符和注释里引用的字面量**。本次修注释时
 顺手把占位符的字面大括号写进了注释，计数从 2 变 3，整个首页 500。已在新注释里
 写明不要这么做。
+## 九、DESK-31：创建流程缺了校验，于是建出了必然失败的部署
+
+### 现象
+
+用户点了推荐卡上的「Qwen3 8B · GGUF · q4_k_m」，后端选 llama.cpp，然后创建。
+每条都变成 FAILED：
+
+```
+dep_1790587468398_18  llama.cpp  port 11434  model_path "Qwen/Qwen3-8B"
+  log: 找不到模型文件：Qwen/Qwen3-8B
+  log: llama.cpp 需要本机 .gguf 文件路径，HuggingFace 仓库 id 不能直接启动。
+```
+
+用户的判断是「创建的时候流程缺失」—— **完全正确**。日志里那句话是对的，但它出现在
+启动时，那时部署已经写进列表、看起来像一个真的部署了。
+
+### 根因：目录只有一个 `huggingface` 字段，而它只对部分后端有效
+
+| 后端 | `model_path` 的实际语义 | `Qwen/Qwen3-8B` 有效吗 |
+|---|---|---|
+| ollama | pull 用的 tag | ✗（应该用 `qwen3:8b`） |
+| **llama.cpp** | **本机 .gguf 文件路径** | **✗** |
+| mlx | HuggingFace 仓库 id（自己下载） | ✓ |
+| docker | 容器内的 HF 仓库 id / 路径 | ✓ |
+| transformers | 本机目录或权重文件 | ✗ |
+
+`fillDeployModels()` 把 `source.huggingface` 当成了所有后端的路径。对 mlx / docker 这
+是对的，对 llama.cpp 是错的。而表单旁边还写着「这一项自动填自控制面目录，不是你填的；
+启动时会照这个值执行」—— 用户有充分理由相信它是对的。
+
+第三个问题：`#d-port` 硬编码 11434，`syncDeploy()` 只在 ollama 分支重设它。切到
+llama.cpp 就带着 Ollama 的端口去启动，第二个服务永远绑不上。
+
+### 修复
+
+**1. 端口跟着后端走。** `BACKEND_PORT` 给出每个后端的默认值（llama.cpp 8080、mlx 8081、
+sglang 30000…）；用户自己改过（`PORT_USER_SET`）就不再覆盖。
+
+**2. llama.cpp 不再被自动填上仓库 id。** `syncDeploy()` 在该分支清空该字段（仅当当前值
+确实来自目录），提示随之变成 warn 色并说清「只加载本机 .gguf，请填绝对路径」。mlx 分支
+改用 `source.mlx`（mlx-community 那份），docker 分支仍用仓库 id。
+
+**3. 创建时校验，而不是启动时。** 新增 `checkLocalModelPath()`，按后端语义检查：
+llama.cpp 必须是存在的 `.gguf` **文件**的**绝对路径**（目录、非 .gguf、相对路径都拒）；
+transformers 要求路径存在；ollama / mlx / docker 不受影响（它们的值本来就不是本机路径）。
+`create()` 抛出的错误经 server 变成 400 的 `detail`，前端本来就会显示成「被拒绝：…」。
+
+**4. 端口冲突。** 同步检查只和 **RUNNING/STARTING** 的部署冲突 —— 第一版把每条记录都算上，
+结果连「替换一个 FAILED 部署」都被拒，测试直接抓到了。ollama 之间互相豁免（它们共用
+同一个守护进程，全都被钉在 11434）。
+
+**5. 实时端口探测。** 记录只能说明本应用自己的部署，说明不了 Ollama 守护进程 —— 而正好是
+它占着 11434。所以创建非 ollama 后端前，用 `portInUse()` 真的去 bind 一下；ollama 跳过
+（它本来就该占着）。
+
+### 测试
+
+| 文件 | 新增 |
+|---|---|
+| `desktop/test-frontend.js` | 7 条：仓库 id 不被当路径、端口是 8080、warn 文案、mlx 用 mlx-community、docker 仍用仓库 id、用户设的端口不被覆盖、createDeploy 发请求前拦住 |
+| `desktop/test-trust.js` | 9 条 `checkLocalModelPath` 单元断言（含「docker/mlx/ollama 不受影响」） |
+| `desktop/test-server.js` | 2 条：端口被占时 400、ollama 不被误伤 |
+| `desktop/smoke.js` | 改写：不存在的 gguf 与 HF 仓库 id 都在创建时被拒 |
+
+变异验证（四条新检查逐一拆掉，全部被抓）：
+
+```
+A 清空仓库 id  → 2 failed  (llama.cpp 不拿仓库 id 当路径 / warn 文案)
+B 端口不随后端 → 1 failed  (端口不是 11434 -> 拿到 8000)
+C create() 不查文件 → 4 failed
+D server 不探测端口 → 1 failed
+```
+
+### 顺带修的测试设计问题
+
+DESK-26 的「合法值仍接受」表原本绕 `create()` 跑。加了存在性检查后，`/models/my model.gguf`
+这类**字符串合法**的值被**文件不存在**挡下 —— 两件事混在一起测。「能不能当模型标识」是
+纯字符串契约，改成直接测 `safeModelRef()`（为此把它导出）。
+
+### 还没做的
+
+- **没有 GGUF 下载能力**。所以推荐卡选中一个本机没有的 GGUF 模型时，用户只能自己去下。
+  现在至少会在创建时明确告诉他这件事，而不是先建一个失败的部署。要真正做到一键，需要
+  实现 HF `-GGUF` 仓库解析 + 按量化挑文件 + 下载进度 —— 未实现。
+- 目录里 GGUF 条目的 `huggingface` 字段指向的是 **safetensors** 仓库（`Qwen/Qwen3-8B`），
+  不是 `-GGUF` 仓库。这个字段现在只被 mlx / docker 使用，所以暂时无害，但它名不副实，
+  一旦拿去做 GGUF 下载就会错。**未修**。
+

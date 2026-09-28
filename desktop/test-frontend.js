@@ -971,6 +971,101 @@ app.whenReady().then(async () => {
   check("DESK-30 刷新后 llama.cpp 不再标未安装（CONFIG 真的被重取）",
     refreshBackends.afterNeeds === false, JSON.stringify(refreshBackends));
 
+
+  // --- DESK-31：创建流程的默认值与校验 ------------------------------------
+  // 实际发生过的：目录把 HuggingFace 仓库 id 填成 llama.cpp 的模型路径，端口还留着
+  // Ollama 的 11434，创建时什么都不查 —— 三个必然失败的部署就这么被建了出来。
+  const b31 = await run(`(async () => {
+    const out = {};
+    const pathEl = document.getElementById('d-path');
+    const portEl = document.getElementById('d-port');
+    const beEl = document.getElementById('d-backend');
+    const originEl = document.getElementById('d-origin');
+    const modelEl = document.getElementById('d-model');
+    const logEl = document.getElementById('d-log');
+    // 这个探针会改 DEPLOY_MODELS / PATH_FROM_CATALOG / PORT_USER_SET 和四个表单
+    // 控件。改完必须原样还原，否则后面的测试全被污染（DESK-28 的教训）。
+    const saved = {
+      models: DEPLOY_MODELS, path: PATH_FROM_CATALOG, port: PORT_USER_SET,
+      modelHTML: modelEl.innerHTML, modelVal: modelEl.value,
+      be: beEl.value, portVal: portEl.value, pathVal: pathEl.value,
+      log: logEl.textContent, originHTML: originEl.innerHTML,
+      originDisplay: originEl.style.display, originClass: originEl.className,
+    };
+    const catalog = { recommendations: [
+      { id: 'qwen3-8b', name: 'Qwen3 8B', quantization: 'Q4_K_M', fits: true,
+        reason_key: 'ok', recommended: true,
+        source: { ollama: 'qwen3:8b', huggingface: 'Qwen/Qwen3-8B',
+                  mlx: 'mlx-community/Qwen3-8B-4bit' } },
+    ] };
+    try {
+      // 1) llama.cpp：仓库 id 不能当路径，端口不能是 Ollama 的
+      PORT_USER_SET = false;
+      fillDeployModels(catalog);
+      beEl.value = 'llama.cpp';
+      syncDeploy();
+      out.llamaPath = pathEl.value;
+      out.llamaPort = portEl.value;
+      out.llamaHint = originEl.textContent;
+      out.llamaWarn = originEl.className.indexOf('warn') >= 0;
+
+      // 2) mlx：仓库 id 在这里是对的，而且要用 mlx-community 那一份
+      PORT_USER_SET = false;
+      beEl.value = 'mlx';
+      syncDeploy();
+      out.mlxPath = pathEl.value;
+      out.mlxPort = portEl.value;
+
+      // 3) docker：仓库 id 同样是对的
+      PORT_USER_SET = false;
+      beEl.value = 'docker';
+      syncDeploy();
+      out.dockerPath = pathEl.value;
+
+      // 4) 用户自己设过端口，就不该被后端默认值覆盖
+      PORT_USER_SET = false;
+      beEl.value = 'ollama';
+      syncDeploy();
+      portEl.value = '7777';
+      portEl.dispatchEvent(new Event('change', { bubbles: true }));
+      beEl.value = 'llama.cpp';
+      syncDeploy();
+      out.keptPort = portEl.value;
+
+      // 5) createDeploy 在发请求之前就拦住仓库 id
+      pathEl.value = 'Qwen/Qwen3-8B';
+      let posted = false;
+      const sf = window.fetch;
+      window.fetch = function () { posted = true; return Promise.reject(new Error('不该走到这里')); };
+      await createDeploy();
+      window.fetch = sf;
+      out.repoPosted = posted;
+      out.repoMsg = logEl.textContent;
+      return out;
+    } finally {
+      DEPLOY_MODELS = saved.models; PATH_FROM_CATALOG = saved.path; PORT_USER_SET = saved.port;
+      modelEl.innerHTML = saved.modelHTML; modelEl.value = saved.modelVal;
+      beEl.value = saved.be; portEl.value = saved.portVal; pathEl.value = saved.pathVal;
+      logEl.textContent = saved.log; originEl.innerHTML = saved.originHTML;
+      originEl.style.display = saved.originDisplay; originEl.className = saved.originClass;
+    }
+  })()`);
+  check("DESK-31 llama.cpp 不拿 HuggingFace 仓库 id 当模型路径",
+    b31.llamaPath === '', JSON.stringify(b31.llamaPath));
+  check("DESK-31 llama.cpp 的端口不是 Ollama 的 11434",
+    b31.llamaPort === '8080', b31.llamaPort);
+  check("DESK-31 llama.cpp 说清只加载本机 .gguf 且用 warn 样式",
+    b31.llamaHint.indexOf('.gguf') >= 0 && b31.llamaWarn === true, b31.llamaHint);
+  check("DESK-31 mlx 用 mlx-community 那份权重",
+    b31.mlxPath === 'mlx-community/Qwen3-8B-4bit', b31.mlxPath);
+  check("DESK-31 docker 仍然用 HuggingFace 仓库 id",
+    b31.dockerPath === 'Qwen/Qwen3-8B', b31.dockerPath);
+  check("DESK-31 用户自己设的端口不被覆盖",
+    b31.keptPort === '7777', b31.keptPort);
+  check("DESK-31 createDeploy 在发请求前拦住仓库 id",
+    b31.repoPosted === false && b31.repoMsg.indexOf('HuggingFace') >= 0,
+    JSON.stringify({ posted: b31.repoPosted, msg: b31.repoMsg }));
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   app.exit(fail ? 1 : 0);
 }).catch((e) => { console.error("FAILED:", e && e.stack || e); app.exit(1); });

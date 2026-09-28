@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { probe } = require("./probe");
-const { Deployments } = require("./deploy");
+const { Deployments, safePort, portInUse } = require("./deploy");
 
 const SERVICE = (process.env.MDP_SERVICE || "http://127.0.0.1:8790").replace(/[/]+$/, "");
 const FRONTEND = path.join(__dirname, "..", "frontend", "index.html");
@@ -377,6 +377,17 @@ async function handle(req, res) {
           if (requireToken(req, res, url)) return undefined;
           const body = await jsonBody(req);
           body.hardware = await probeCached();
+          // Ollama deployments all share the one daemon that is *supposed*
+          // to be listening on 11434, so the probe would always fail there.
+          // Every other backend wants a port of its own.
+          if (body.backend && body.backend !== "ollama") {
+            const wantPort = safePort(body.port, 8000);
+            if (await portInUse(wantPort, "127.0.0.1")) {
+              return send(res, 400, JSON.stringify({ detail:
+                "端口 " + wantPort + " 已被本机其他程序占用（不是本应用创建的部署）。" +
+                "换一个端口再试；如果那是 Ollama，用 ollama 后端而不是把它当端口号。" }));
+            }
+          }
           return send(res, 200, JSON.stringify(deploys.create(body)));
         }
         return methodNotAllowed(res, "GET, POST");

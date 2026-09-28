@@ -428,6 +428,35 @@ function rawRequest(port, rawPath, method) {
   check("DESK-29 token 每进程固定，不随响应变化",
     /API_TOKEN='([^']*)'/.exec(pageAgain)[1] === TOKEN);
 
+  // --- DESK-31: 创建时要知道端口是不是真的被占着 ---------------------------
+  // 记录只能说明「本应用自己的部署」，说明不了 Ollama 守护进程 —— 而正好是它占着
+  // 11434，被指过去的那个 llama.cpp 部署永远绑不上。
+  const net = require("node:net");
+  const busySrv = await new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, "127.0.0.1", () => resolve(srv));
+  });
+  const busy = busySrv.address().port;
+  const probeGguf = path.join(dataDir, "probe.gguf");
+  fs.writeFileSync(probeGguf, "placeholder");
+  const postDep = (body) => fetch(withToken(base + "api/deployments"), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const clashRes = await postDep({ backend: "llama.cpp", model_path: probeGguf, port: busy });
+  const clashBody = await clashRes.json().catch(() => null);
+  check("DESK-31 端口被别的程序占用时创建被拒",
+    clashRes.status === 400 && String(clashBody && clashBody.detail).indexOf("占用") >= 0,
+    clashRes.status + " " + JSON.stringify(clashBody));
+
+  // Ollama 例外：所有 ollama 部署共用那个守护进程，11434「被占用」才是正常的。
+  const okOllama = await postDep({ backend: "ollama", model_name: "qwen3:8b" });
+  const okOllamaBody = await okOllama.json().catch(() => null);
+  check("DESK-31 ollama 不被端口探测误伤（它本来就该占着 11434）",
+    okOllama.status === 200, okOllama.status + " " + JSON.stringify(okOllamaBody));
+  busySrv.close();
+
   await s.close();
   upstream.server.closeAllConnections();
   upstream.server.close();

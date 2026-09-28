@@ -150,7 +150,7 @@ details.card[open]>summary{margin-bottom:12px}
     <div class="field"><label for="d-backend">后端</label><select id="d-backend" data-change="syncDeploy">
       <option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option>
       <option value="transformers">transformers</option><option value="vllm">vllm</option><option value="sglang">sglang</option></select></div>
-    <div class="field"><label for="d-port">端口</label><input id="d-port" type="number" min="1024" max="65535" step="1" value="11434"></div>
+    <div class="field"><label for="d-port">端口</label><input id="d-port" type="number" min="1024" max="65535" step="1" data-change="manualPort" value="11434"></div>
     <div class="field wide"><label for="d-path">模型路径 / Ollama 标签</label><input id="d-path" data-change="manualPath" value="qwen3:8b"></div>
 <div class="advisory" id="d-origin" style="display:none"></div>
     <div class="field wide"><label for="d-name">模型名（OpenAI 请求用）</label><input id="d-name" value="qwen3:8b"></div>
@@ -276,6 +276,22 @@ function withToken(u){
 // 只保留「值从哪来」这一个事实。
 var PATH_FROM_CATALOG=false;
 
+// 端口同理：目录/后端给了默认值之后，用户再自己改过就别再覆盖他。
+var PORT_USER_SET=false;
+
+// 每个后端自己的默认端口。以前这个框硬编码 11434，只有 ollama 会重设它，
+// 于是选 llama.cpp 会带着 Ollama 的端口去启动，第二个服务永远绑不上。
+var BACKEND_PORT={'ollama':11434,'llama.cpp':8080,'llamacpp':8080,'mlx':8081,
+  'transformers':8000,'vllm':8000,'sglang':30000,'docker':8000};
+
+// 只有 llama.cpp 把 model_path 当成单个本机 .gguf 文件读。目录里的
+// huggingface 字段是给 mlx / docker 用的仓库 id，对 llama.cpp 无效。
+function needsLocalFile(backend){return backend==='llama.cpp'||backend==='llamacpp';}
+
+// org/name 且没有前导斜杠 —— 看着像 HuggingFace 仓库 id。和桌面端 create() 里
+// 的 looksLikeRepoId 是同一条规则：这里先给用户一个即时提示，权威判断仍在服务端。
+function looksLikeRepoIdFront(v){return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v);}
+
 // Every interaction goes through delegation instead of inline onclick/onchange
 // attributes. That is not a style preference: the CSP dropped script-src
 // 'unsafe-inline', so inline handlers - and any inline <script> an attacker
@@ -328,6 +344,9 @@ document.addEventListener('change',function(ev){
   else if(name==='manualPath'){
     // 用户自己动过这个框，它就不再是「目录自动填的」了。
     PATH_FROM_CATALOG=false; renderOriginHint();
+  }
+  else if(name==='manualPort'){
+    PORT_USER_SET=true;
   }
 });
 
@@ -673,7 +692,9 @@ function fillDeployModels(rec){
   var sel=document.getElementById('d-model');
   var rows=(rec.recommendations||[]).filter(function(r){return r.fits&&r.reason_key!=='backend-incompatible';});
   DEPLOY_MODELS=rows.map(function(r){
-    return {id:r.id,name:r.name,ollama:(r.source&&r.source.ollama)||'',path:(r.source&&r.source.huggingface)||r.id};
+    return {id:r.id,name:r.name,ollama:(r.source&&r.source.ollama)||'',
+      path:(r.source&&r.source.huggingface)||r.id,
+      mlx:(r.source&&r.source.mlx)||''};
   });
   sel.innerHTML=rows.map(function(r,i){
     return '<option value="'+i+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
@@ -932,12 +953,25 @@ function ollamaRegistry(tag){
 function renderOriginHint(){
   var el=document.getElementById('d-origin');
   if(!el){return;}
-  if(!PATH_FROM_CATALOG){el.style.display='none';el.textContent='';return;}
   var backend=document.getElementById('d-backend').value;
   var val=document.getElementById('d-path').value;
-  var msg='这一项自动填自控制面目录，不是你填的；启动时会照这个值执行。';
-  var cls='advisory';
-  if(backend==='ollama'){
+  var msg='',cls='advisory';
+  if(needsLocalFile(backend)){
+    // 这条必须显示，哪怕值不是目录填的：目录给的仓库 id 看起来「像」一个合理的
+    // 填写值，正是它造成了三个必然失败的部署（DESK-31）。
+    if(!val){
+      msg='llama.cpp 只加载本机 .gguf 文件。控制面目录给的是 HuggingFace 仓库 id（那个字段对 mlx / docker 才有效），不能直接启动 —— 请填这个 .gguf 在本机的绝对路径。';
+      cls='warn';
+    } else if(looksLikeRepoIdFront(val)){
+      msg='「'+esc(val)+'」看着像 HuggingFace 仓库 id，不是本机文件。llama.cpp 需要本机 .gguf 的绝对路径。';
+      cls='warn';
+    } else {
+      msg='将用本机文件启动：'+esc(val)+'。';
+    }
+  } else if(!PATH_FROM_CATALOG){
+    el.style.display='none';el.textContent='';return;
+  } else if(backend==='ollama'){
+    msg='这一项自动填自控制面目录，不是你填的；启动时会照这个值执行。';
     var reg=ollamaRegistry(val);
     if(reg&&KNOWN_REGISTRIES.indexOf(reg)<0){
       msg='这个标签来自控制面目录，将从第三方 registry「'+esc(reg)+'」拉取模型权重。确认是你认识的主机再启动。';
@@ -952,16 +986,28 @@ function syncDeploy(){
   updateDockerBlock();
   var m=currentModel(); if(!m) return;
   var backend=document.getElementById('d-backend').value;
+  // 端口跟着后端走，除非用户自己设过。以前只有 ollama 会重设它，选 llama.cpp
+  // 就带着 Ollama 的 11434 去启动。
+  if(!PORT_USER_SET){document.getElementById('d-port').value=BACKEND_PORT[backend]||8000;}
   if(backend==='ollama'){
-    document.getElementById('d-port').value=11434;
     document.getElementById('d-path').value=m.ollama||m.id;
     document.getElementById('d-name').value=m.ollama||m.id;
+    PATH_FROM_CATALOG=true;
+  } else if(needsLocalFile(backend)){
+    // 目录里的 huggingface 字段对 llama.cpp 无效。只在当前值确实来自目录时清掉，
+    // 用户自己填过的路径要保留。
+    if(PATH_FROM_CATALOG){document.getElementById('d-path').value='';}
+    document.getElementById('d-name').value=m.id;
+    PATH_FROM_CATALOG=false;
+  } else if(backend==='mlx'){
+    document.getElementById('d-path').value=m.mlx||m.path||m.id;
+    document.getElementById('d-name').value=m.id;
+    PATH_FROM_CATALOG=true;
   } else {
     document.getElementById('d-path').value=m.path||m.id;
     document.getElementById('d-name').value=m.id;
+    PATH_FROM_CATALOG=true;
   }
-  // 刚被目录覆盖，所以又变回「自动填的」状态。
-  PATH_FROM_CATALOG=true;
   renderOriginHint();
   refreshAdvisory();
 }
@@ -1189,6 +1235,14 @@ async function createDeploy(){
   var port=+document.getElementById('d-port').value;
   var log=document.getElementById('d-log');
   if(!validPort(port)){log.textContent='端口必须是 1024~65535 的整数，当前是「'+document.getElementById('d-port').value+'」。';return;}
+  // 先给即时反馈。权威判断在桌面端 create()（它能 stat 本机文件），这里只是
+  // 不让用户白等一次往返（DESK-31）。
+  if(needsLocalFile(backend)){
+    var pv=document.getElementById('d-path').value.trim();
+    if(!pv){log.textContent='llama.cpp 需要本机 .gguf 文件的绝对路径，请先填写。';return;}
+    if(looksLikeRepoIdFront(pv)){log.textContent='「'+pv+'」是 HuggingFace 仓库 id，不是本机文件。llama.cpp 只能加载本机 .gguf；请填它的绝对路径。';return;}
+    if(pv.charAt(0)!=='/'){log.textContent='llama.cpp 的模型路径必须是绝对路径，当前是「'+pv+'」。';return;}
+  }
   var body={model_path:document.getElementById('d-path').value,model_id:m?m.id:'custom',
     model_name:document.getElementById('d-name').value,backend:backend,
     port:port};

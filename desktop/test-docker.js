@@ -318,8 +318,12 @@ function buildFakeDocker(dir) {
     const cdir = path.join(dir, "concurrent");
     const d1 = new Deployments(cdir, "");
     const d2 = new Deployments(cdir, "");
-    d1.create({ backend: "llama.cpp", model_path: "/tmp/x.gguf", port: 9001 });
-    d2.create({ backend: "llama.cpp", model_path: "/tmp/x.gguf", port: 9002 });
+    // create() now checks that a llama.cpp model path is a real .gguf file, so
+    // this has to be one rather than a plausible-looking string (DESK-31).
+    const gguf = path.join(dir, "concurrent.gguf");
+    fs.writeFileSync(gguf, "fake");
+    d1.create({ backend: "llama.cpp", model_path: gguf, port: 9001 });
+    d2.create({ backend: "llama.cpp", model_path: gguf, port: 9002 });
     const fresh = new Deployments(cdir, "");
     check("DESK-13：双实例并发写不丢更新", fresh.list().length === 2, "count=" + fresh.list().length);
     check("DESK-13：原子写不留 .tmp", !fs.existsSync(path.join(cdir, "deployments.json.tmp")));

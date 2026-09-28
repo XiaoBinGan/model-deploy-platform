@@ -2,6 +2,7 @@
 
 const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { installPlan, BACKEND_INFO, gpuPath, OFFICIAL_IMAGE } = require("./installers");
@@ -79,6 +80,86 @@ function safePort(value, fallback) {
     return fallback === undefined ? null : fallback;
   }
   return n;
+}
+// Which backends read model_path as a path on THIS machine, and what it must be.
+//
+// The catalog carries exactly one `huggingface` field, and the deploy form used
+// it as the path for every backend alike. That is correct only for mlx and
+// docker, which download the repo themselves. For llama.cpp it produced three
+// deployments that could never start:
+//
+//   dep_1790587468398_18  llama.cpp  port 11434  path "Qwen/Qwen3-8B"
+//   -> 找不到模型文件：Qwen/Qwen3-8B
+//
+// The same string is right for one backend and meaningless for another, and the
+// form told the user it was filled automatically. So the check belongs at
+// creation, where the value can still be corrected - not at start, where the row
+// is already written and looks like a real deployment (DESK-31).
+const LOCAL_MODEL_PATH = {
+  "llama.cpp": { ext: ".gguf", what: "本机 .gguf 文件" },
+  llamacpp: { ext: ".gguf", what: "本机 .gguf 文件" },
+  transformers: { ext: null, what: "本机模型目录或权重文件" },
+};
+
+// "org/name" with no leading slash: the shape of a HuggingFace repo id. It says
+// nothing about whether such a repo exists - existence on disk is what decides.
+function looksLikeRepoId(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+function checkLocalModelPath(modelPath, backend) {
+  const rule = LOCAL_MODEL_PATH[backend];
+  if (!rule) return; // ollama tag, or an mlx/docker repo id: not a local path
+  const shown = JSON.stringify(modelPath);
+  const repo = looksLikeRepoId(modelPath)
+    ? " 这看起来是 HuggingFace 仓库 id，不是本机文件；" + backend +
+      " 只能加载" + rule.what + "（仓库 id 只对 mlx / docker 后端有效）。"
+    : "";
+  if (!path.isAbsolute(modelPath)) {
+    throw new Error(backend + " 的模型路径必须是绝对路径，当前是 " + shown + "。" + repo);
+  }
+  let st = null;
+  try { st = fs.statSync(modelPath); } catch (e) { st = null; }
+  if (!st) {
+    throw new Error("本机没有这个" + (rule.ext ? "文件" : "路径") + "：" + shown +
+      "。" + backend + " 只能加载" + rule.what + "，请先把它放到本机。" + repo);
+  }
+  if (rule.ext && !st.isFile()) {
+    throw new Error(shown + " 是目录，不是文件。" + backend + " 需要" + rule.what + "。");
+  }
+  if (rule.ext && path.extname(modelPath).toLowerCase() !== rule.ext) {
+    throw new Error(shown + " 不是 " + rule.ext + " 文件。" + backend + " 需要" + rule.what + "。");
+  }
+}
+
+// Two deployments on one port means the second one never binds. Ollama is the
+// exception: every ollama deployment shares the single daemon that already
+// listens on 11434, which is why create() pins them all there.
+// Only a deployment that is actually listening blocks the port. A CREATED or
+// FAILED row is not holding anything, so replacing one is legitimate - the
+// first version of this check counted every row and rejected exactly that.
+function portConflict(items, port, id, backend) {
+  for (const other of items) {
+    if (other.id === id || other.port !== port) continue;
+    if (other.status !== "RUNNING" && other.status !== "STARTING") continue;
+    if (other.backend === "ollama" && backend === "ollama") continue;
+    return other;
+  }
+  return null;
+}
+
+// A record is not the only thing that can hold a port. The Ollama daemon
+// listens on 11434 without any deployment of ours, and that is how a
+// llama.cpp deployment ended up aimed at Ollama's port. Rows can only speak
+// for our own deployments, so ask the OS. Not part of create(): that stays
+// synchronous, and this is a network-shaped question.
+function portInUse(port, host) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", (e) => resolve(e.code === "EADDRINUSE"));
+    srv.once("listening", () => srv.close(() => resolve(false)));
+    try { srv.listen(port, host || "127.0.0.1"); } catch (e) { resolve(false); }
+  });
 }
 
 // The model reference is the one caller-supplied value that reaches spawn() as
@@ -681,6 +762,16 @@ class Deployments {
     // The docker-only fields are validated before anything is stored, and a
     // rejection reaches the caller as a 400 (docs/docker-design.md §5).
     const docker = backend === "docker" ? validateDockerFields(req) : null;
+    // Creation is the last moment the user can still fix this, so the checks
+    // that used to live only in _runLlama/_runTransformers happen here too
+    // (DESK-31). The _run* guards stay: a row written before this, or edited
+    // by hand, still must not reach spawn().
+    checkLocalModelPath(modelPath, backend);
+    const clash = portConflict(this.items.values(), port, id, backend);
+    if (clash) {
+      throw new Error("端口 " + port + " 已被部署 " + clash.id + "（" + clash.backend +
+        "，状态 " + clash.status + "）占用。换一个端口，或先删掉那个部署。");
+    }
     const host = "127.0.0.1";
     const item = {
       id,
@@ -1488,4 +1579,4 @@ class Deployments {
   }
 }
 
-module.exports = { Deployments, safePort, hasBinary };
+module.exports = { Deployments, safePort, hasBinary, portInUse, checkLocalModelPath, safeModelRef };

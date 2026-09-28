@@ -14,7 +14,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
-const { Deployments } = require("./deploy.js");
+const { Deployments, safeModelRef, checkLocalModelPath } = require("./deploy.js");
 
 let pass = 0;
 let fail = 0;
@@ -181,6 +181,10 @@ function hostileService(reply) {
       rejected ? "已拒绝" : "被接受了");
   }
   // 合法值必须仍然接受，否则这个校验就是在帮倒忙。
+  //
+  // 这里直接测 safeModelRef，而不是绕 create()。DESK-26 的契约是「这个字符串能不
+  // 能当模型标识」，而 create() 现在还多查一条「本机到底有没有这个文件」（DESK-31）——
+  // 两件事。混在一起测会让「字符串合法」被「文件不存在」掩盖掉。
   const mustAccept = [
     ["qwen3:8b", "ollama"],
     ["hf.co/user/repo:Q4_K_M", "ollama"],
@@ -190,8 +194,7 @@ function hostileService(reply) {
   ];
   for (const [val, backend] of mustAccept) {
     let ok = true;
-    try { d4.create({ backend, model_name: val, model_path: val, port: 8000 }); }
-    catch (e) { ok = false; }
+    try { safeModelRef(val, backend); } catch (e) { ok = false; }
     check("DESK-26 合法值仍接受 " + JSON.stringify(val), ok);
   }
   check("DESK-26 超长模型标识被拒", (() => {
@@ -238,6 +241,28 @@ function hostileService(reply) {
   check("负端口回退到 8000", weird2.port === 8000, String(weird2.port));
 
   fs.rmSync(dir, { recursive: true, force: true });
+
+  // --- DESK-31: 各后端对 model_path 的语义不同 -----------------------------
+  // 目录只有一个 huggingface 字段，而它只对 mlx / docker 有效。llama.cpp 读的是
+  // 本机 .gguf 文件，把仓库 id 填进去就是建一个必然失败的部署。
+  // 用独立的目录：这里的 dir 到收尾时已经不存在了。
+  const u31 = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-desk31-"));
+  const ggufFile = path.join(u31, "unit.gguf");
+  fs.writeFileSync(ggufFile, "placeholder");
+  fs.writeFileSync(path.join(u31, "unit.json"), "{}");
+  const refThrows = (val, backend) => {
+    try { checkLocalModelPath(val, backend); return false; } catch (e) { return true; }
+  };
+  check("DESK-31 llama.cpp 接受存在的 .gguf", !refThrows(ggufFile, "llama.cpp"));
+  check("DESK-31 llama.cpp 拒绝 HuggingFace 仓库 id", refThrows("Qwen/Qwen3-8B", "llama.cpp"));
+  check("DESK-31 llama.cpp 拒绝不存在的文件", refThrows(path.join(u31, "nope.gguf"), "llama.cpp"));
+  check("DESK-31 llama.cpp 拒绝非 .gguf 文件", refThrows(path.join(u31, "unit.json"), "llama.cpp"));
+  check("DESK-31 llama.cpp 拒绝相对路径", refThrows("model.gguf", "llama.cpp"));
+  check("DESK-31 llama.cpp 拒绝目录", refThrows(u31, "llama.cpp"));
+  check("DESK-31 docker 的仓库 id 不受影响", !refThrows("Qwen/Qwen3-8B", "docker"));
+  check("DESK-31 mlx 的仓库 id 不受影响", !refThrows("mlx-community/Qwen3-8B-4bit", "mlx"));
+  check("DESK-31 ollama 的标签不受影响", !refThrows("qwen3:8b", "ollama"));
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error("FAILED:", e.stack); process.exit(1); });

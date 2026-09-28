@@ -125,27 +125,39 @@ async function waitSettled(base, id, seconds) {
       "GB (self ram=" + self.ram_gb + "GB, capacity=" + capacityGb + "GB)");
 
   // --- failure path: llama.cpp with a model file that does not exist ---
-  const bad = (await postJson(base + "api/deployments",
-    { model_path: "/nonexistent/model.gguf", model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 })).body;
-  check("create deployment", bad && bad.status === "CREATED" && bad.port === 8080, bad && bad.id);
+  // This used to be accepted and only failed at start, which left a row that
+  // looked like a real deployment. It is refused at creation now (DESK-31).
+  const bad = await postJson(base + "api/deployments",
+    { model_path: "/nonexistent/model.gguf", model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 });
+  check("不存在的 gguf 在创建时就被拒，并说清原因",
+    bad.status === 400 && String((bad.body || {}).detail || "").indexOf("本机") >= 0,
+    bad.status + " " + JSON.stringify(bad.body));
 
-  await postJson(base + "api/deployments/" + bad.id + "/start");
-  const settled = await waitSettled(base, bad.id, 20);
-  check("bad gguf path fails with a clear log", settled.status === "FAILED" &&
-    (settled.log || []).some((l) => l.indexOf(".gguf") >= 0),
-    settled.status + " | " + (settled.log || []).slice(-1)[0]);
+  // The value the catalog used to fill in for llama.cpp.
+  const repoId = await postJson(base + "api/deployments",
+    { model_path: "Qwen/Qwen3-8B", model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 });
+  check("HF 仓库 id 不能当 llama.cpp 的模型路径（且点名 HuggingFace）",
+    repoId.status === 400 && String((repoId.body || {}).detail || "").indexOf("HuggingFace") >= 0,
+    repoId.status + " " + JSON.stringify(repoId.body));
 
-  const h = (await getJson(base + "api/deployments/" + bad.id + "/health")).body || {};
+  // A real file, because creation now requires one to exist.
+  const ggufPath = path.join(dataDir, "smoke.gguf");
+  fs.writeFileSync(ggufPath, "placeholder");
+  const good = (await postJson(base + "api/deployments",
+    { model_path: ggufPath, model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 })).body;
+  check("create deployment", good && good.status === "CREATED" && good.port === 8080, good && good.id);
+
+  const h = (await getJson(base + "api/deployments/" + good.id + "/health")).body || {};
   check("health reports unhealthy", h.healthy === false, h.error || h.status_code);
 
-  const t = (await postJson(base + "api/deployments/" + bad.id + "/test", { message: "hi" })).body || {};
+  const t = (await postJson(base + "api/deployments/" + good.id + "/test", { message: "hi" })).body || {};
   check("test reports failure, not a crash", t.ok === false, String(t.error).slice(0, 60));
 
   const list = (await getJson(base + "api/deployments")).body || {};
   check("deployments persisted", (list.deployments || []).length === 1, (list.deployments || []).length + " item(s)");
 
   // --- deletion: the list used to grow forever with no way to remove anything ---
-  const delRes = await fetch(withToken(base + "api/deployments/" + bad.id), { method: "DELETE" });
+  const delRes = await fetch(withToken(base + "api/deployments/" + good.id), { method: "DELETE" });
   const delBody = await delRes.json().catch(() => null);
   const after = (await getJson(base + "api/deployments")).body || {};
   check("delete removes the deployment",
