@@ -306,7 +306,11 @@ async function handle(req, res) {
     try {
       return send(res, 200, renderIndex(), "text/html; charset=utf-8");
     } catch (e) {
-      return send(res, 500, "找不到 frontend/index.html", "text/plain; charset=utf-8");
+      // The blanket "找不到" was wrong and cost a diagnostic step: a
+      // placeholder-count mismatch (say, someone quoting the literal in a
+      // comment) reported a missing file that was present all along.
+      console.error("[desktop] 渲染首页失败:", e.message);
+      return send(res, 500, "首页渲染失败：" + e.message, "text/plain; charset=utf-8");
     }
   }
 

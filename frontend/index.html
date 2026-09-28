@@ -283,9 +283,13 @@ var PATH_FROM_CATALOG=false;
 // Delegation also means the renderers below can emit buttons without wiring a
 // listener after every re-render.
 //
-// The nonce is a fixed string in a static file, not a per-response value. It is
-// still useful: an injected tag cannot guess it, and the DOM hides nonce values
-// from getAttribute. It is NOT a substitute for escaping.
+// The nonce is a per-response placeholder, substituted by the server on every
+// render - a constant in a public repo would be decorative. Do NOT write the
+// placeholder's literal braces in this file: the server counts occurrences with
+// split() and cannot tell a real placeholder from one quoted in a comment.
+// Measured: script.getAttribute('nonce') returns the real value; the DOM does
+// NOT hide it. Only already-running script can read it, so it still raises the
+// bar for an injected <script>. It is NOT a substitute for escaping.
 var ACTIONS={
   refresh:function(){refresh();},
   usePick:function(){usePick();},
@@ -577,6 +581,13 @@ function resetStatus(){
   });
 }
 async function refresh(){
+  // Re-fetch backend availability first. CONFIG used to be loaded once in
+  // init() and never again, so after installing llama.cpp this ran and the
+  // dropdown still said 本机未安装 - the button labelled 刷新 did not refresh
+  // the one thing the user had just changed. Read the value after fillBackends
+  // because a no-longer-valid selection is reassigned there.
+  try{CONFIG=await (await fetch('/api/backends')).json();}catch(e){CONFIG={};}
+  fillBackends();
   var backend=document.getElementById('backend').value||'ollama';
   var env,rec;
   try{env=await (await fetch('/api/environment/latest')).json();}catch(e){env=null;}

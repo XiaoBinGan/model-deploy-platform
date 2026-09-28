@@ -527,3 +527,67 @@ caps        {"platform":"darwin","docker":false,"nvidia":false}
 ```
 
 F-08（后端 id）也已由后端代理修掉（uuid4），见上表。
+
+## 八、本轮（DESK-30）：装完了点「刷新」还是「本机未安装」
+
+### 现象
+
+用户在提示下装了 llama.cpp，弹框里 `brew install llama.cpp` 正常跑完（brew 说
+「already installed and up-to-date」），点「刷新并关闭」之后，后端下拉里**仍然**
+写着「本机未安装」。用户直接问「实际是不是已经安装了」。
+
+### 事实核查
+
+**已经安装了。** `/opt/homebrew/bin/llama-server` 存在，`which llama-server` 能找到，
+`/api/backends` 返回 `['ollama','llama.cpp','mlx','docker']`。
+
+brew 那句「already installed」指的是 **keg 已存在但没链接**：`brew install` 补做了链接。
+证据是符号链接的时间戳 —— 链接创建于 17:11:14，用户报告问题在 17:15，也就是那次
+安装才把它变出来。所以「安装前显示未安装」在当时是**正确的**。
+
+### 真正的原因
+
+`refresh()` 根本没有重新拉 `/api/backends`：
+
+```js
+async function refresh(){
+  var backend=document.getElementById('backend').value||'ollama';
+  env = await fetch('/api/environment/latest')      // 只更新这两样
+  rec = await fetch('/api/models/recommend', ...)
+  // CONFIG 不在这里，它只在 init() 里取过一次
+}
+```
+
+而 `backendStatus()` / `fillBackends()` 读的全是 `CONFIG`。所以**按钮上写着「刷新」，
+刷的却不是用户刚改变的那样东西** —— 只有整页重新加载才会更新。
+
+这是第 9 条（后端下拉硬编码、不用 CONFIG）的同类问题：CONFIG 被当成了常量。
+
+### 修复
+
+`refresh()` 开头先重取 `/api/backends` 并重新 `fillBackends()`，然后才读当前选中值
+（因为 `fillBackends()` 会把已失效的选择换掉）。
+
+### 测试
+
+`desktop/test-frontend.js` 加 2 条：把 CONFIG 伪装成「装之前」，打桩 `/api/backends`
+返回装好之后的状态，调 `refresh()`，断言 `#d-backend` 里 llama.cpp 的
+`data-needs-install` 消失。
+
+变异验证（把 CONFIG 重取去掉）：`{'beforeNeeds':true,'afterNeeds':true}` —— 与用户
+看到的症状一模一样，1 条失败。
+
+### 顺手修的两处
+
+1. **误导性的 500**：`renderIndex()` 抛错时一律回「找不到 frontend/index.html」，
+   而文件其实在。真正的原因是占位符数量不对。改成回真实原因并 `console.error`。
+   这个误导信息让本次排查多绕了一步。
+2. **`index.html` 里一处过期注释**仍写着「nonce 是静态文件里的固定串」和
+   「DOM 会隐藏 getAttribute 里的 nonce」—— 两条都不成立（nonce 早已改成按响应
+   替换；实测 `getAttribute` 返回真值）。已按实测事实改写。
+
+### 一个值得记住的坑
+
+占位符计数用的是 `split()`，**分不清真占位符和注释里引用的字面量**。本次修注释时
+顺手把占位符的字面大括号写进了注释，计数从 2 变 3，整个首页 500。已在新注释里
+写明不要这么做。

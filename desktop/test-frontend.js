@@ -932,6 +932,45 @@ app.whenReady().then(async () => {
   })()`);
   check("部署操作走 data 属性而不是裸拼 onclick", s1.n === 4 && s1.inline === false && s1.actions.join(",") === "start,stop,logs,delete", s1.actions.join(","));
 
+
+  // --- DESK-30:「刷新」必须真的刷新后端可用性 -------------------------------
+  // 实际发生过的：用户按提示装完 llama.cpp，点「刷新并关闭」，下拉里仍然写着
+  // 「本机未安装」。因为 CONFIG 只在 init() 里取过一次，refresh() 根本不碰它 ——
+  // 按钮上写着「刷新」，刷的却不是用户刚改变的那样东西。
+  const refreshBackends = await run(`(async () => {
+    const savedFetch = window.fetch;
+    const savedConfig = CONFIG;
+    const savedLast = LAST;
+    try {
+      // 伪装成「装之前」
+      CONFIG = { backends: ['ollama'], installable: {}, unavailable: {} };
+      fillBackends();
+      const before = document.querySelector('#d-backend option[value="llama.cpp"]');
+      const beforeNeeds = !!(before && before.hasAttribute('data-needs-install'));
+      // 装完了：服务端现在说 llama.cpp 可用。其余端点故意失败，让 refresh 跳过渲染。
+      window.fetch = function (url) {
+        if (String(url).indexOf('/api/backends') >= 0) {
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+            backends: ['ollama', 'llama.cpp', 'mlx', 'docker'], installable: {}, unavailable: {} }) });
+        }
+        return Promise.reject(new Error('not stubbed'));
+      };
+      await refresh();
+      const after = document.querySelector('#d-backend option[value="llama.cpp"]');
+      const afterNeeds = !!(after && after.hasAttribute('data-needs-install'));
+      return { beforeNeeds: beforeNeeds, afterNeeds: afterNeeds };
+    } finally {
+      window.fetch = savedFetch;
+      CONFIG = savedConfig;
+      LAST = savedLast;
+      fillBackends();
+    }
+  })()`);
+  check("DESK-30 装之前 llama.cpp 标着未安装",
+    refreshBackends.beforeNeeds === true, JSON.stringify(refreshBackends));
+  check("DESK-30 刷新后 llama.cpp 不再标未安装（CONFIG 真的被重取）",
+    refreshBackends.afterNeeds === false, JSON.stringify(refreshBackends));
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   app.exit(fail ? 1 : 0);
 }).catch((e) => { console.error("FAILED:", e && e.stack || e); app.exit(1); });
