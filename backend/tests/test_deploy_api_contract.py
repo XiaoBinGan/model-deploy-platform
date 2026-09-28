@@ -95,7 +95,7 @@ def test_port_in_range_is_accepted(client, local, port):
 def test_stopped_or_failed_deployment_is_never_healthy(monkeypatch):
     dep = deployments.create(model_path="m", model_id="m", backend="ollama")
     # The daemon still answers, but this deployment is not running.
-    monkeypatch.setattr(deployments.httpx, "get",
+    monkeypatch.setattr(deployments.local_http, "get",
                         lambda *a, **k: SimpleNamespace(status_code=200))
     for status in ("STOPPED", "FAILED", "BLOCKED", "CREATED"):
         dep["status"] = status
@@ -107,7 +107,7 @@ def test_stopped_or_failed_deployment_is_never_healthy(monkeypatch):
 def test_running_deployment_still_probes_health(monkeypatch):
     dep = deployments.create(model_path="m", model_id="m", backend="transformers")
     dep["status"] = "RUNNING"
-    monkeypatch.setattr(deployments.httpx, "get",
+    monkeypatch.setattr(deployments.local_http, "get",
                         lambda *a, **k: SimpleNamespace(status_code=200))
     assert deployments.health(dep["id"])["healthy"] is True
 

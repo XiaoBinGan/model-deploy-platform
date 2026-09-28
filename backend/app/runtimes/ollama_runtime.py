@@ -1,13 +1,13 @@
 """Ollama runtime backend — uses Ollama's OpenAI-compatible API.
 Ollama runs as a separate service; this backend detects it and manages model loading."""
 import time, json
-import httpx
+from app import local_http
 
 OLLAMA_BASE = "http://127.0.0.1:11434"
 
 def detect(environment: dict | None = None) -> dict:
     try:
-        r = httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
+        r = local_http.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
         if r.status_code == 200:
             models = r.json().get("models", [])
             return {
@@ -24,7 +24,7 @@ def detect(environment: dict | None = None) -> dict:
 
 def list_models() -> list[dict]:
     try:
-        r = httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=10)
+        r = local_http.get(f"{OLLAMA_BASE}/api/tags", timeout=10)
         if r.status_code == 200:
             return [
                 {
@@ -43,7 +43,7 @@ def list_models() -> list[dict]:
 
 def health_check(host: str = "127.0.0.1", port: int = 11434) -> dict:
     try:
-        r = httpx.get(f"http://{host}:{port}/api/tags", timeout=5)
+        r = local_http.get(f"http://{host}:{port}/api/tags", timeout=5)
         return {"healthy": r.status_code == 200, "status_code": r.status_code}
     except Exception as e:
         return {"healthy": False, "error": str(e)}
@@ -56,7 +56,7 @@ def build_command(model_name: str, port: int = 11434) -> list[str]:
 def start_model(model_name: str) -> dict:
     """Preload a model into Ollama's memory."""
     try:
-        r = httpx.post(
+        r = local_http.post(
             f"{OLLAMA_BASE}/api/generate",
             json={"model": model_name, "prompt": "", "stream": False, "keep_alive": "30m"},
             timeout=120,

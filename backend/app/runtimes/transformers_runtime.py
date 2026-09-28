@@ -36,10 +36,10 @@ def start(command: list[str], env: dict | None = None) -> subprocess.Popen:
     )
 
 def health_check(host: str, port: int, timeout: int = 30) -> dict:
-    import httpx
+    from app import local_http
     for _ in range(timeout * 2):
         try:
-            r = httpx.get(f"http://{host}:{port}/health", timeout=2)
+            r = local_http.get(f"http://{host}:{port}/health", timeout=2)
             if r.status_code == 200:
                 return {"healthy": True, "status_code": 200}
         except Exception:

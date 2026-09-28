@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-import httpx
+from app import local_http
 
 DEPLOYMENTS = {}
 
@@ -62,7 +62,7 @@ def _detect_backends() -> list[str]:
     backends = []
     # Check Ollama
     try:
-        r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=3)
+        r = local_http.get("http://127.0.0.1:11434/api/tags", timeout=3)
         if r.status_code == 200:
             backends.append("ollama")
     except Exception:
@@ -301,7 +301,7 @@ def start(deployment_id: str) -> dict:
     if dep["backend"] == "ollama":
         # Ollama is already running; just preload the model
         try:
-            r = httpx.post(
+            r = local_http.post(
                 f"http://127.0.0.1:{dep['port']}/api/generate",
                 json={"model": dep["model_path"], "prompt": "", "stream": False, "keep_alive": "30m"},
                 timeout=120,
@@ -343,7 +343,7 @@ def start(deployment_id: str) -> dict:
             if proc.poll() is not None:
                 break
             try:
-                r = httpx.get(f"http://{dep['host']}:{dep['port']}/health", timeout=1)
+                r = local_http.get(f"http://{dep['host']}:{dep['port']}/health", timeout=1)
                 if r.status_code == 200:
                     healthy = True
                     break
@@ -389,7 +389,7 @@ def stop(deployment_id: str) -> dict:
     # For ollama, unload model from memory
     if dep["backend"] == "ollama":
         try:
-            httpx.post(
+            local_http.post(
                 f"http://127.0.0.1:{dep['port']}/api/generate",
                 json={"model": dep["model_path"], "keep_alive": "0"},
                 timeout=10,
@@ -443,7 +443,7 @@ def health(deployment_id: str) -> dict:
         return {"deployment_id": deployment_id, "url": url, "healthy": False,
                 "status": status, "reason": f"部署状态为 {status}，服务未在运行"}
     try:
-        r = httpx.get(url, timeout=5)
+        r = local_http.get(url, timeout=5)
         return {"deployment_id": deployment_id, "url": url, "status_code": r.status_code,
                 "healthy": r.status_code == 200, "status": status}
     except Exception as e:
@@ -460,7 +460,7 @@ def test_chat(deployment_id: str, message: str = "你好，请用一句话介绍
     model = model_name or dep["model_path"]
     url = f"http://{dep['host']}:{dep['port']}/v1/chat/completions"
     try:
-        r = httpx.post(url, json={
+        r = local_http.post(url, json={
             "model": model,
             "messages": [{"role": "user", "content": message}],
             "max_tokens": max_tokens,

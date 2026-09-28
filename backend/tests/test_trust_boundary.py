@@ -8,6 +8,7 @@ and whether the caller controls the URLs handed back to the UI.
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -166,3 +167,45 @@ def test_public_host_helper_falls_back_instead_of_reflecting():
     resolved = main._public_host(FakeRequest())
     assert resolved != "attacker.test"
     assert resolved in main._local_addresses() or resolved == "127.0.0.1"
+
+
+# --- 本机请求不得走代理 ------------------------------------------------------
+# httpx 默认 trust_env=True。macOS 上这会读**系统**代理设置（不只是环境变量），
+# 于是一个配了代理的机器上，发往 127.0.0.1 的请求会被送出去再拿回 502。
+# 实测：同一台机器 curl 到 ollama 是 200，httpx 是 502，_detect_backends() 因此
+# 报不出 ollama，每个 ollama 部署都被建成了 BLOCKED —— 而 ollama 其实好好跑着。
+
+def test_local_http_pins_trust_env_false(monkeypatch):
+    from app import local_http
+    seen = []
+
+    def spy(method):
+        def call(url, **kwargs):
+            seen.append((method, url, kwargs))
+            return SimpleNamespace(status_code=200)
+        return call
+
+    monkeypatch.setattr(local_http.httpx, 'get', spy('get'))
+    monkeypatch.setattr(local_http.httpx, 'post', spy('post'))
+    local_http.get('http://127.0.0.1:11434/api/tags', timeout=3)
+    local_http.post('http://127.0.0.1:11434/api/generate', json={}, timeout=3)
+
+    assert len(seen) == 2, seen
+    for method, url, kwargs in seen:
+        assert kwargs.get('trust_env') is False, (method, url, kwargs)
+        # 调用方给的超时不能被覆盖掉
+        assert 'timeout' in kwargs
+
+
+def test_backend_probes_use_local_http_not_bare_httpx():
+    """守住这个改动本身：本机探测一旦退回裸 httpx，代理问题就回来了。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent / 'app'
+    offenders = []
+    for path in root.rglob('*.py'):
+        if path.name == 'local_http.py':
+            continue
+        text = path.read_text()
+        if 'httpx.get(' in text or 'httpx.post(' in text:
+            offenders.append(str(path.relative_to(root)))
+    assert offenders == [], f'这些文件直接用了 httpx，应改走 local_http: {offenders}'

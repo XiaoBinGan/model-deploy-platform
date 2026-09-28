@@ -91,7 +91,7 @@ def test_transformers_start_times_out_and_kills_the_child(monkeypatch):
                              backend="transformers", port=8123)
     proc = _FakeProc()
     monkeypatch.setattr(deployments.subprocess, "Popen", lambda *a, **k: proc)
-    monkeypatch.setattr(deployments.httpx, "get",
+    monkeypatch.setattr(deployments.local_http, "get",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no health")))
     monkeypatch.setattr(deployments, "TRANSFORMERS_START_TIMEOUT", 0.05)
     monkeypatch.setattr(deployments.time, "sleep", lambda seconds: None)
