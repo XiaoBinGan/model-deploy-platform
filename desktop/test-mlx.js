@@ -89,7 +89,21 @@ process.on("SIGTERM", () => { server.close(() => process.exit(0)); });
   return bin;
 }
 
-// Run the whole lifecycle against one fake mlx-lm "version".
+// 每次要一个空闲端口。之前写死 8931，于是任何残留进程（比如上一次运行被
+// `| head` 提前截断，SIGPIPE 留下子进程）都会让后续整轮 5 条一起失败，
+// 而报错看起来像「mlx_lm.server 退出，code=1」，完全指不到真正的原因。
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = require("node:net").createServer();
+    s.on("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+// Run the whole lifecycle against one fake mlx-lm "version". 
 async function runCase(dir, helpText, label, loadMs) {
   const helpFile = path.join(dir, "help-" + label + ".txt");
   fs.writeFileSync(helpFile, helpText);
@@ -98,10 +112,11 @@ async function runCase(dir, helpText, label, loadMs) {
   process.env.MLX_LOAD_MS = String(loadMs || 0);
 
   const d = new Deployments(path.join(dir, "data-" + label), "");
+  const port = await freePort();
   const item = d.create({
     backend: "mlx",
     model_path: "mlx-community/Qwen3-8B-4bit",
-    port: 8931,
+    port: port,
   });
   const t0 = Date.now();
   d.start(item.id);
@@ -130,8 +145,17 @@ async function runCase(dir, helpText, label, loadMs) {
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-mlx-"));
   process.env.PATH = buildFakePython(dir) + path.delimiter + process.env.PATH;
+  // 只用假 python，光靠 PATH 不够：_mlxPython() 会**先**看 ~/.mdp-mlx，而那正是
+  // 应用会装出来的目录。开发机上它通常真的存在，于是测试静默跑去用真 venv，
+  // 假的 args 文件永远不写，最后以 ENOENT 崩掉（本机实际发生过）。
+  // 之前这个测试通过只是因为那台机器恰好没装 mlx-lm —— 那是环境依赖，不是隔离。
+  process.env.MDP_MLX_PYTHON = path.join(dir, "bin", "python3");
 
   try {
+    // 防回归：确认解析到的解释器就是测试自己的假 python。
+    const resolved = await new Deployments(path.join(dir, "data-resolve"), "")._mlxPython();
+    check("解析到的是测试的假 python，不是真 ~/.mdp-mlx",
+      resolved === path.join(dir, "bin", "python3"), String(resolved));
     // --- case A: an older mlx-lm, without --kv-bits (this is 0.31.3 today) ---
     const noKv = "  --model MODEL\n  --host HOST\n  --port PORT\n";
     const a = await runCase(dir, noKv, "nokv");
