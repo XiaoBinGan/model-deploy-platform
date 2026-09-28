@@ -49,6 +49,9 @@ const INSTALL = `(() => {
     if (p === '/api/environment/latest') return json({});
     if (p === '/api/backends') return json(window.__CONFIG || {});
     if (p === '/api/hardware/resolve') return json({ budget: {}, normalized: {} });
+    if (p === '/api/models/gguf/plan') return json(window.__GGUF_PLAN || {},
+      window.__GGUF_PLAN_OK === undefined ? true : window.__GGUF_PLAN_OK,
+      window.__GGUF_PLAN_STATUS);
     return json({});
   };
   window.__stubFetch = window.fetch;
@@ -1066,6 +1069,139 @@ app.whenReady().then(async () => {
     b31.repoPosted === false && b31.repoMsg.indexOf('HuggingFace') >= 0,
     JSON.stringify({ posted: b31.repoPosted, msg: b31.repoMsg }));
 
+
+  // --- DESK-32：一键下载并部署（页面侧）-----------------------------------
+  // 用户的原话是「还是太不方便了 我需要自动化 傻瓜式的」。告诉缺什么还不够，
+  // 得有一条点下去的出路。真正的网络集成在 test-server.js 里测；这里只验证
+  // 页面把这条路挂上去了、并且说什么。
+  const b32 = await run(`(async () => {
+    const out = {};
+    const pathEl = document.getElementById('d-path');
+    const beEl = document.getElementById('d-backend');
+    const originEl = document.getElementById('d-origin');
+    const modelEl = document.getElementById('d-model');
+    const saved = {
+      models: DEPLOY_MODELS, path: PATH_FROM_CATALOG, port: PORT_USER_SET,
+      modelHTML: modelEl.innerHTML, modelVal: modelEl.value,
+      be: beEl.value, pathVal: pathEl.value,
+      originHTML: originEl.innerHTML, originDisplay: originEl.style.display,
+      originClass: originEl.className, modal: document.getElementById('modal').style.display,
+      ggufPlan: window.__GGUF_PLAN, config: CONFIG,
+    };
+    try {
+      CONFIG = Object.assign({}, CONFIG, { local: true });
+      const withRepo = { recommendations: [
+        { id: 'qwen3-8b', name: 'Qwen3 8B', quantization: 'Q4_K_M', fits: true,
+          reason_key: 'ok', recommended: true,
+          source: { ollama: 'qwen3:8b', huggingface: 'Qwen/Qwen3-8B',
+                    mlx: 'mlx-community/Qwen3-8B-4bit', gguf: 'Qwen/Qwen3-8B-GGUF' } },
+      ] };
+      const noRepo = { recommendations: [
+        { id: 'custom-thing', name: '没有仓库的模型', quantization: 'Q4_K_M', fits: true,
+          reason_key: 'ok', source: { huggingface: 'x/y' } },
+      ] };
+
+      // 1) 目录没给 GGUF 仓库时，不能拿一个坏按钮骗人
+      PORT_USER_SET = false;
+      fillDeployModels(noRepo);
+      beEl.value = 'llama.cpp';
+      syncDeploy();
+      out.noRepoHint = originEl.textContent;
+      out.noRepoBtn = !!originEl.querySelector('[data-act=\"autoGguf\"]');
+
+      // 2) 有仓库时，llama.cpp 的提示里必须挂上一键按钮，且点名仓库
+      PORT_USER_SET = false;
+      fillDeployModels(withRepo);
+      beEl.value = 'llama.cpp';
+      syncDeploy();
+      out.hasBtn = !!originEl.querySelector('[data-act=\"autoGguf\"]');
+      out.hintRepo = originEl.textContent;
+
+      // 3) 换成 mlx 就不该有它 —— 那个后端本来就自己下载
+      beEl.value = 'mlx';
+      syncDeploy();
+      out.mlxBtn = !!originEl.querySelector('[data-act=\"autoGguf\"]');
+
+      // 3b) 控制面直连的页面没有下载端点，给按钮就是给一个按不动的东西
+      beEl.value = 'llama.cpp';
+      CONFIG = Object.assign({}, CONFIG, { local: false });
+      syncDeploy();
+      out.remoteBtn = !!originEl.querySelector('[data-act=\"autoGguf\"]');
+      out.remoteHint = originEl.textContent;
+      CONFIG = Object.assign({}, CONFIG, { local: true });
+
+      // 4) 还没下载：给出仓库、文件、大小，等确认；这一步不能碰模型路径
+      beEl.value = 'llama.cpp';
+      syncDeploy();
+      window.__GGUF_PLAN = { repo: 'Qwen/Qwen3-8B-GGUF', quant: 'q4_k_m',
+        bytes: 5027783488, needs_download: true,
+        model_path: '/Users/me/.mdp-models/Qwen--Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf',
+        files: [{ name: 'Qwen3-8B-Q4_K_M.gguf', size: 5027783488 }] };
+      await autoGguf();
+      const body = document.getElementById('m-body');
+      const actions = document.getElementById('m-actions');
+      out.modalShown = document.getElementById('modal').style.display;
+      out.planText = body.textContent;
+      out.confirm = !!actions.querySelector('[data-act=\"ggufGo\"]');
+      out.pathBeforeConfirm = pathEl.value;
+
+      // 5) 已经下载过：不必再问一遍，直接填好并给出「创建并启动」
+      window.__GGUF_PLAN = { repo: 'Qwen/Qwen3-8B-GGUF', quant: 'q4_k_m',
+        bytes: 5027783488, needs_download: false,
+        model_path: '/Users/me/.mdp-models/Qwen--Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf',
+        files: [{ name: 'Qwen3-8B-Q4_K_M.gguf', size: 5027783488 }] };
+      await autoGguf();
+      out.alreadyText = document.getElementById('m-body').textContent;
+      out.alreadyPath = pathEl.value;
+      out.alreadyDeploy = !!document.getElementById('m-actions').querySelector('[data-act=\"ggufDeploy\"]');
+
+      // 6) 查询失败要说明白，而不是留一个空对话框
+      window.__GGUF_PLAN = { detail: '仓库 Qwen/nope 不存在' };
+      window.__GGUF_PLAN_OK = false;
+      window.__GGUF_PLAN_STATUS = 400;
+      await autoGguf();
+      out.badText = document.getElementById('m-body').textContent;
+      out.badHasConfirm = !!document.getElementById('m-actions').querySelector('[data-act=\"ggufGo\"]');
+      out.hb = humanBytes(4.68 * 1024 * 1024 * 1024) + ' / ' + humanBytes(0);
+      return out;
+    } finally {
+      closeModal();
+      CONFIG = saved.config;
+      window.__GGUF_PLAN = saved.ggufPlan;
+      delete window.__GGUF_PLAN_OK; delete window.__GGUF_PLAN_STATUS;
+      DEPLOY_MODELS = saved.models; PATH_FROM_CATALOG = saved.path; PORT_USER_SET = saved.port;
+      modelEl.innerHTML = saved.modelHTML; modelEl.value = saved.modelVal;
+      beEl.value = saved.be; pathEl.value = saved.pathVal;
+      originEl.innerHTML = saved.originHTML; originEl.style.display = saved.originDisplay;
+      originEl.className = saved.originClass;
+      document.getElementById('modal').style.display = saved.modal;
+    }
+  })()`);
+  check("DESK-32 没有 GGUF 仓库的模型不显示下载按钮，并说清原因",
+    b32.noRepoBtn === false && b32.noRepoHint.indexOf('GGUF') >= 0,
+    JSON.stringify({ btn: b32.noRepoBtn, hint: b32.noRepoHint }));
+  check("DESK-32 llama.cpp 的提示里挂上了一键下载按钮", b32.hasBtn === true, String(b32.hasBtn));
+  check("DESK-32 按钮旁点名了 GGUF 仓库",
+    b32.hintRepo.indexOf('Qwen/Qwen3-8B-GGUF') >= 0, b32.hintRepo);
+  check("DESK-32 mlx 不显示这个按钮（它自己会下载）", b32.mlxBtn === false, String(b32.mlxBtn));
+  check("DESK-32 控制面直连时不显示这个按钮，并指向桌面端",
+    b32.remoteBtn === false && b32.remoteHint.indexOf('桌面端') >= 0,
+    JSON.stringify({ btn: b32.remoteBtn, hint: b32.remoteHint }));
+  check("DESK-32 对话框说清仓库、文件、大小",
+    b32.planText.indexOf('Qwen/Qwen3-8B-GGUF') >= 0 &&
+    b32.planText.indexOf('Qwen3-8B-Q4_K_M.gguf') >= 0 &&
+    b32.planText.indexOf('4.68 GB') >= 0, b32.planText);
+  check("DESK-32 下载前只给「确认下载」，不直接开始", b32.confirm === true, String(b32.confirm));
+  check("DESK-32 没确认之前不动模型路径", b32.pathBeforeConfirm === '',
+    JSON.stringify(b32.pathBeforeConfirm));
+  check("DESK-32 已下载过就不再问，直接填好路径",
+    b32.alreadyPath.indexOf('Qwen3-8B-Q4_K_M.gguf') >= 0 &&
+    b32.alreadyText.indexOf('已经有') >= 0, JSON.stringify(b32.alreadyPath));
+  check("DESK-32 已下载过时给的是「创建并启动」", b32.alreadyDeploy === true, String(b32.alreadyDeploy));
+  check("DESK-32 查不到时说清楚，且不给确认按钮",
+    b32.badText.indexOf('拿不到') >= 0 && b32.badHasConfirm === false,
+    b32.badText);
+  check("DESK-32 humanBytes 好读", b32.hb === '4.68 GB / 未知大小', String(b32.hb));
   console.log("\n" + pass + " passed, " + fail + " failed");
   app.exit(fail ? 1 : 0);
 }).catch((e) => { console.error("FAILED:", e && e.stack || e); app.exit(1); });

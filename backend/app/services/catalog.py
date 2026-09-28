@@ -245,36 +245,36 @@ def _e(params_b, quality, layers, kv_kib, ctx, caps, cuda=True, gguf=True, awq=T
     )
 
 
-def _s(id_, label, ollama=None, hf=None, mlx="auto"):
+def _s(id_, label, ollama=None, hf=None, mlx="auto", gguf=None):
     # mlx="auto" derives the repo; pass mlx=None for entries whose HuggingFace id
     # is already a CUDA-specific artifact (an AWQ repo has no mlx counterpart).
     return {"id": id_, "label": label, "ollama": ollama, "huggingface": hf,
-            "mlx": mlx_repo(hf) if mlx == "auto" else mlx}
+            "mlx": mlx_repo(hf) if mlx == "auto" else mlx, "gguf": gguf}
 
 
 CATALOG = [
-    _e(0.5, 45, 24, 16, 32768, ["chat", "chinese"], cuda=False, source=_s("qwen2.5-0.5b", "Qwen2.5 0.5B · GGUF", "qwen2.5:0.5b", "Qwen/Qwen2.5-0.5B-Instruct")),
-    _e(1.0, 48, 16, 24, 131072, ["chat", "english", "code"], cuda=False, source=_s("llama3.2-1b", "Llama 3.2 1B · GGUF", "llama3.2:1b", "meta-llama/Llama-3.2-1B-Instruct")),
-    _e(1.5, 55, 28, 32, 32768, ["chat", "chinese", "code"], cuda=False, source=_s("qwen2.5-1.5b", "Qwen2.5 1.5B · GGUF", "qwen2.5:1.5b", "Qwen/Qwen2.5-1.5B-Instruct")),
-    _e(3.0, 60, 28, 48, 131072, ["chat", "english", "vision"], cuda=False, source=_s("llama3.2-3b", "Llama 3.2 3B · GGUF", "llama3.2:3b", "meta-llama/Llama-3.2-3B-Instruct")),
-    _e(3.0, 62, 36, 48, 32768, ["chat", "chinese", "code", "tool_calling"], cuda=False, source=_s("qwen2.5-3b", "Qwen2.5 3B · GGUF", "qwen2.5:3b", "Qwen/Qwen2.5-3B-Instruct")),
-    _e(4.0, 66, 34, 64, 131072, ["chat", "vision", "english"], source=_s("gemma3-4b", "Gemma 3 4B · GGUF", "gemma3:4b", "google/gemma-3-4b-it")),
-    _e(3.8, 68, 32, 56, 131072, ["chat", "code", "english", "reasoning"], source=_s("phi4-mini", "Phi-4-mini · GGUF", "phi4-mini", "microsoft/Phi-4-mini-instruct")),
-    _e(7.0, 70, 32, 112, 32768, ["chat", "english", "code"], source=_s("mistral-7b", "Mistral 7B · GGUF", "mistral:7b", "mistralai/Mistral-7B-Instruct-v0.3")),
-    _e(7.0, 72, 28, 112, 32768, ["chat", "chinese", "code", "tool_calling"], source=_s("qwen2.5-7b", "Qwen2.5 7B · GGUF", "qwen2.5:7b", "Qwen/Qwen2.5-7B-Instruct")),
-    _e(7.0, 73, 28, 112, 32768, ["code", "chat", "chinese"], source=_s("qwen2.5-coder-7b", "Qwen2.5-Coder 7B · GGUF", "qwen2.5-coder:7b", "Qwen/Qwen2.5-Coder-7B-Instruct")),
-    _e(8.0, 75, 36, 128, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-8b", "Qwen3 8B · GGUF", "qwen3:8b", "Qwen/Qwen3-8B")),
-    _e(7.0, 74, 28, 112, 32768, ["reasoning", "chat", "chinese"], source=_s("deepseek-r1-7b", "DeepSeek-R1 7B · GGUF", "deepseek-r1:7b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")),
-    _e(8.0, 74, 32, 128, 32768, ["chat", "reasoning", "chinese", "code"], source=_s("internlm3-8b", "InternLM3 8B · GGUF", None, "internlm/internlm3-8b-instruct")),
-    _e(8.0, 76, 32, 128, 131072, ["chat", "tool_calling", "english"], source=_s("llama3.1-8b", "Llama 3.1 8B · GGUF", "llama3.1:8b", "meta-llama/Llama-3.1-8B-Instruct")),
-    _e(7.0, 74, 28, 112, 32768, ["chat", "vision", "chinese"], source=_s("qwen2.5-vl-7b", "Qwen2.5-VL 7B · GGUF", "qwen2.5vl:7b", "Qwen/Qwen2.5-VL-7B-Instruct")),
-    _e(12.0, 78, 40, 160, 131072, ["chat", "english", "code", "tool_calling"], source=_s("mistral-nemo-12b", "Mistral Nemo 12B · GGUF", "mistral-nemo", "mistralai/Mistral-Nemo-Instruct-2407")),
-    _e(14.0, 80, 48, 200, 32768, ["chat", "chinese", "tool_calling"], source=_s("qwen2.5-14b", "Qwen2.5 14B · GGUF", "qwen2.5:14b", "Qwen/Qwen2.5-14B-Instruct")),
-    _e(14.0, 82, 40, 200, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-14b", "Qwen3 14B · GGUF", "qwen3:14b", "Qwen/Qwen3-14B")),
-    _e(30.0, 84, 48, 96, 262144, ["chat", "reasoning", "chinese", "tool_calling"], decode_fraction=0.12, moe=True, source=_s("qwen3-30b-a3b", "Qwen3 30B-A3B · MoE GGUF", "qwen3:30b", "Qwen/Qwen3-30B-A3B")),
-    _e(32.0, 86, 64, 320, 32768, ["chat", "chinese", "tool_calling", "long_context"], source=_s("qwen2.5-32b", "Qwen2.5 32B · GGUF", "qwen2.5:32b", "Qwen/Qwen2.5-32B-Instruct")),
-    _e(32.0, 88, 64, 320, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-32b", "Qwen3 32B · GGUF", "qwen3:32b", "Qwen/Qwen3-32B")),
-    _e(32.0, 87, 64, 320, 32768, ["reasoning", "chat", "chinese"], source=_s("deepseek-r1-32b", "DeepSeek-R1 32B · GGUF", "deepseek-r1:32b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")),
+    _e(0.5, 45, 24, 16, 32768, ["chat", "chinese"], cuda=False, source=_s("qwen2.5-0.5b", "Qwen2.5 0.5B · GGUF", "qwen2.5:0.5b", "Qwen/Qwen2.5-0.5B-Instruct", gguf="Qwen/Qwen2.5-0.5B-Instruct-GGUF")),
+    _e(1.0, 48, 16, 24, 131072, ["chat", "english", "code"], cuda=False, source=_s("llama3.2-1b", "Llama 3.2 1B · GGUF", "llama3.2:1b", "meta-llama/Llama-3.2-1B-Instruct", gguf="unsloth/Llama-3.2-1B-Instruct-GGUF")),
+    _e(1.5, 55, 28, 32, 32768, ["chat", "chinese", "code"], cuda=False, source=_s("qwen2.5-1.5b", "Qwen2.5 1.5B · GGUF", "qwen2.5:1.5b", "Qwen/Qwen2.5-1.5B-Instruct", gguf="Qwen/Qwen2.5-1.5B-Instruct-GGUF")),
+    _e(3.0, 60, 28, 48, 131072, ["chat", "english", "vision"], cuda=False, source=_s("llama3.2-3b", "Llama 3.2 3B · GGUF", "llama3.2:3b", "meta-llama/Llama-3.2-3B-Instruct", gguf="unsloth/Llama-3.2-3B-Instruct-GGUF")),
+    _e(3.0, 62, 36, 48, 32768, ["chat", "chinese", "code", "tool_calling"], cuda=False, source=_s("qwen2.5-3b", "Qwen2.5 3B · GGUF", "qwen2.5:3b", "Qwen/Qwen2.5-3B-Instruct", gguf="Qwen/Qwen2.5-3B-Instruct-GGUF")),
+    _e(4.0, 66, 34, 64, 131072, ["chat", "vision", "english"], source=_s("gemma3-4b", "Gemma 3 4B · GGUF", "gemma3:4b", "google/gemma-3-4b-it", gguf="unsloth/gemma-3-4b-it-GGUF")),
+    _e(3.8, 68, 32, 56, 131072, ["chat", "code", "english", "reasoning"], source=_s("phi4-mini", "Phi-4-mini · GGUF", "phi4-mini", "microsoft/Phi-4-mini-instruct", gguf="unsloth/Phi-4-mini-instruct-GGUF")),
+    _e(7.0, 70, 32, 112, 32768, ["chat", "english", "code"], source=_s("mistral-7b", "Mistral 7B · GGUF", "mistral:7b", "mistralai/Mistral-7B-Instruct-v0.3", gguf="bartowski/Mistral-7B-Instruct-v0.3-GGUF")),
+    _e(7.0, 72, 28, 112, 32768, ["chat", "chinese", "code", "tool_calling"], source=_s("qwen2.5-7b", "Qwen2.5 7B · GGUF", "qwen2.5:7b", "Qwen/Qwen2.5-7B-Instruct", gguf="Qwen/Qwen2.5-7B-Instruct-GGUF")),
+    _e(7.0, 73, 28, 112, 32768, ["code", "chat", "chinese"], source=_s("qwen2.5-coder-7b", "Qwen2.5-Coder 7B · GGUF", "qwen2.5-coder:7b", "Qwen/Qwen2.5-Coder-7B-Instruct", gguf="Qwen/Qwen2.5-Coder-7B-Instruct-GGUF")),
+    _e(8.0, 75, 36, 128, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-8b", "Qwen3 8B · GGUF", "qwen3:8b", "Qwen/Qwen3-8B", gguf="Qwen/Qwen3-8B-GGUF")),
+    _e(7.0, 74, 28, 112, 32768, ["reasoning", "chat", "chinese"], source=_s("deepseek-r1-7b", "DeepSeek-R1 7B · GGUF", "deepseek-r1:7b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", gguf="unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF")),
+    _e(8.0, 74, 32, 128, 32768, ["chat", "reasoning", "chinese", "code"], source=_s("internlm3-8b", "InternLM3 8B · GGUF", None, "internlm/internlm3-8b-instruct", gguf="internlm/internlm3-8b-instruct-gguf")),
+    _e(8.0, 76, 32, 128, 131072, ["chat", "tool_calling", "english"], source=_s("llama3.1-8b", "Llama 3.1 8B · GGUF", "llama3.1:8b", "meta-llama/Llama-3.1-8B-Instruct", gguf="unsloth/Llama-3.1-8B-Instruct-GGUF")),
+    _e(7.0, 74, 28, 112, 32768, ["chat", "vision", "chinese"], source=_s("qwen2.5-vl-7b", "Qwen2.5-VL 7B · GGUF", "qwen2.5vl:7b", "Qwen/Qwen2.5-VL-7B-Instruct", gguf="unsloth/Qwen2.5-VL-7B-Instruct-GGUF")),
+    _e(12.0, 78, 40, 160, 131072, ["chat", "english", "code", "tool_calling"], source=_s("mistral-nemo-12b", "Mistral Nemo 12B · GGUF", "mistral-nemo", "mistralai/Mistral-Nemo-Instruct-2407", gguf="unsloth/Mistral-Nemo-Instruct-2407-GGUF")),
+    _e(14.0, 80, 48, 200, 32768, ["chat", "chinese", "tool_calling"], source=_s("qwen2.5-14b", "Qwen2.5 14B · GGUF", "qwen2.5:14b", "Qwen/Qwen2.5-14B-Instruct", gguf="Qwen/Qwen2.5-14B-Instruct-GGUF")),
+    _e(14.0, 82, 40, 200, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-14b", "Qwen3 14B · GGUF", "qwen3:14b", "Qwen/Qwen3-14B", gguf="Qwen/Qwen3-14B-GGUF")),
+    _e(30.0, 84, 48, 96, 262144, ["chat", "reasoning", "chinese", "tool_calling"], decode_fraction=0.12, moe=True, source=_s("qwen3-30b-a3b", "Qwen3 30B-A3B · MoE GGUF", "qwen3:30b", "Qwen/Qwen3-30B-A3B", gguf="Qwen/Qwen3-30B-A3B-GGUF")),
+    _e(32.0, 86, 64, 320, 32768, ["chat", "chinese", "tool_calling", "long_context"], source=_s("qwen2.5-32b", "Qwen2.5 32B · GGUF", "qwen2.5:32b", "Qwen/Qwen2.5-32B-Instruct", gguf="Qwen/Qwen2.5-32B-Instruct-GGUF")),
+    _e(32.0, 88, 64, 320, 32768, ["chat", "reasoning", "chinese", "tool_calling"], source=_s("qwen3-32b", "Qwen3 32B · GGUF", "qwen3:32b", "Qwen/Qwen3-32B", gguf="Qwen/Qwen3-32B-GGUF")),
+    _e(32.0, 87, 64, 320, 32768, ["reasoning", "chat", "chinese"], source=_s("deepseek-r1-32b", "DeepSeek-R1 32B · GGUF", "deepseek-r1:32b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", gguf="unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF")),
     # CUDA-only extras (no GGUF variant)
     _e(8.0, 74, 32, 128, 32768, ["chat", "vision", "chinese"], gguf=False, source=_s("qwen2.5-vl-7b-cuda", "Qwen2.5-VL 7B · AWQ/GPTQ", None, "Qwen/Qwen2.5-VL-7B-Instruct-AWQ", mlx=None)),
     _e(3.8, 66, 32, 56, 131072, ["chat", "code", "english", "reasoning"], gguf=False, source=_s("phi-4-mini-cuda", "Phi-4-mini · AWQ/GPTQ", None, "microsoft/Phi-4-mini-instruct", mlx=None)),

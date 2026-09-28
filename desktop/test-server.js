@@ -457,6 +457,59 @@ function rawRequest(port, rawPath, method) {
     okOllama.status === 200, okOllama.status + " " + JSON.stringify(okOllamaBody));
   busySrv.close();
 
+
+  // --- DESK-32：一键下载走的是真网络 --------------------------------------
+  // 这一组是真的去问 HuggingFace，所以它同时验证了「仓库 id 形状校验 → 列文件
+  // → 挑量化 → 拼 URL」整条链。纯匹配规则在 test-gguf.js 里已单独测过。
+  const ggufPlan = (repo, quant, tok) => {
+    const u = base + "api/models/gguf/plan?repo=" + encodeURIComponent(repo) +
+      "&quant=" + encodeURIComponent(quant);
+    // withToken 拼的是完整 URL，不是 base —— 拼错了整个路径就没了。
+    return fetch(tok === false ? u : withToken(u));
+  };
+
+  const gOk = await ggufPlan("Qwen/Qwen3-8B-GGUF", "q4_k_m");
+  const gOkBody = await gOk.json();
+  check("DESK-32 plan 选出了正确的量化文件",
+    gOk.status === 200 && gOkBody.files.length === 1 &&
+    gOkBody.files[0].name === "Qwen3-8B-Q4_K_M.gguf",
+    gOk.status + " " + JSON.stringify((gOkBody.files || []).map((f) => f.name)));
+  check("DESK-32 plan 报出真实大小",
+    gOkBody.bytes > 4e9 && gOkBody.bytes < 6e9, String(gOkBody.bytes));
+  check("DESK-32 model_path 指向下载后的本机文件",
+    gOkBody.needs_download === true &&
+    gOkBody.model_path.endsWith("Qwen3-8B-Q4_K_M.gguf") &&
+    gOkBody.model_path.indexOf("huggingface") < 0, gOkBody.model_path);
+
+  const gShard = await (await ggufPlan("Qwen/Qwen2.5-7B-Instruct-GGUF", "q4_k_m")).json();
+  check("DESK-32 分片仓库会把每一片都列出来",
+    gShard.files.length === 2 &&
+    gShard.files[0].name.endsWith("00001-of-00002.gguf") &&
+    gShard.files[1].name.endsWith("00002-of-00002.gguf"),
+    JSON.stringify((gShard.files || []).map((f) => f.name)));
+
+  const gQuant = await ggufPlan("Qwen/Qwen3-8B-GGUF", "q9_z_z");
+  const gQuantBody = await gQuant.json();
+  check("DESK-32 仓库里没有这个量化时给 400 并说清楚",
+    gQuant.status === 400 && String(gQuantBody.detail).indexOf("没有") >= 0,
+    gQuant.status + " " + String(gQuantBody.detail));
+
+  const gBad = await ggufPlan("../../etc", "q4_k_m");
+  check("DESK-32 非法仓库 id 在发请求前就被拒",
+    gBad.status === 400 && String((await gBad.json()).detail).indexOf("仓库 id") >= 0, String(gBad.status));
+
+  const gNoTok = await ggufPlan("Qwen/Qwen3-8B-GGUF", "q4_k_m", false);
+  check("DESK-32 plan 也要 token", gNoTok.status === 403, String(gNoTok.status));
+
+  // 下载端点是 GET + 写磁盘，所以它是 <img> 能触发的那种请求，token 是唯一
+  // 拦得住它的东西。无 token 必须被挡在写第一个字节之前。
+  const gDlNoTok = await fetch(base +
+    "api/models/gguf/download?repo=" + encodeURIComponent("Qwen/Qwen3-8B-GGUF") + "&quant=q4_k_m");
+  const gDlBody = await gDlNoTok.text();
+  check("DESK-32 无 token 的下载请求被拒，且没有开始下载",
+    gDlNoTok.status === 403 && gDlBody.indexOf("event-stream") < 0,
+    gDlNoTok.status + " " + gDlBody.slice(0, 60));
+
   await s.close();
   upstream.server.closeAllConnections();
   upstream.server.close();

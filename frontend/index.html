@@ -319,6 +319,10 @@ var ACTIONS={
   parseCode:function(){parseCode();},
   copyProbe:function(){copyProbe();},
   closeModal:function(){closeModal();},
+  autoGguf:function(){autoGguf();},
+  ggufGo:function(){ggufGo();},
+  ggufCancel:function(){ggufCancel();},
+  ggufDeploy:function(){ggufDeploy();},
   quickRam:function(el){quickRam(+(el.getAttribute('data-ram')||0));},
   jump:function(el){jump(el.getAttribute('data-jump'));},
   // Only the backdrop closes it; a click on the dialog itself must not.
@@ -694,7 +698,9 @@ function fillDeployModels(rec){
   DEPLOY_MODELS=rows.map(function(r){
     return {id:r.id,name:r.name,ollama:(r.source&&r.source.ollama)||'',
       path:(r.source&&r.source.huggingface)||r.id,
-      mlx:(r.source&&r.source.mlx)||''};
+      mlx:(r.source&&r.source.mlx)||'',
+      gguf:(r.source&&r.source.gguf)||'', quant:r.quantization||'q4_k_m'};
+
   });
   sel.innerHTML=rows.map(function(r,i){
     return '<option value="'+i+'">'+esc(r.name)+' · '+esc(r.quantization)+(r.recommended?' ★':'')+'</option>';
@@ -786,6 +792,7 @@ var MODAL_MANUAL='';
 
 function closeModal(){
   if(INSTALL_ES){INSTALL_ES.close();INSTALL_ES=null;}
+  if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
   document.getElementById('modal').style.display='none';
 }
 
@@ -950,6 +957,151 @@ function ollamaRegistry(tag){
 
 // 部署表单里最容易被忽略的一点：#d-path 是自动填的，而下拉框显示的是模型
 // 显示名 —— 两个不同的字段。这个提示把「将按哪个值执行、它从哪来」说出来。
+// ---- 一键把 GGUF 下到本机再部署（DESK-32）--------------------------------
+// 控制面给的是「模型 + 建议量化」，具体下哪个文件由桌面端的 gguf.js 按仓库真实
+// 文件列表决定。这里只负责把「仓库 / 文件 / 大小 / 落到哪里」摆给用户看，让他
+// 确认一次，下完接着把部署建起来。
+var GGUF_ES=null;
+var GGUF_PLAN=null;
+
+function humanBytes(n){
+  if(!n||n<0){return '未知大小';}
+  var u=['B','KB','MB','GB','TB'],i=0;
+  while(n>=1024&&i<u.length-1){n/=1024;i++;}
+  return (i===0?n:n.toFixed(2))+' '+u[i];
+}
+
+function dirOf(p){return String(p||'').replace(/\/[^\/]*$/,'')||p;}
+
+function ggufHintHtml(){
+  var m=currentModel(); if(!m){return '';}
+  if(!m.gguf){
+    return '<div class="muted" style="margin-top:8px">这个模型没有配置 GGUF 仓库，需要你自己准备 .gguf 文件。</div>';
+  }
+  // 下载只能由本机那端做。控制面直连的页面没有这些端点，给按钮就是给一个按不动的东西。
+  if(!(CONFIG&&CONFIG.local===true)){
+    return '<div class="muted" style="margin-top:8px">这个模型需要先下载 GGUF（约 4~5 GB）。下载要在桌面端做 —— 用桌面应用打开同一个地址，这里会出现一键按钮。</div>';
+  }
+  return '<div style="margin-top:10px">'+
+    '<button class="primary mini" data-act="autoGguf">⤓ 自动下载并部署</button>'+
+    '<span class="muted" style="margin-left:8px">'+esc(m.quant)+' · '+esc(m.gguf)+'</span></div>';
+}
+
+function modalShell(title){
+  document.getElementById('m-title').textContent=title;
+  var log=document.getElementById('m-log');
+  log.style.display='none';log.textContent='';
+  document.getElementById('modal').style.display='flex';
+}
+
+async function autoGguf(){
+  var m=currentModel(); if(!m||!m.gguf){return;}
+  if(!needsLocalFile(document.getElementById('d-backend').value)){return;}
+  if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
+  modalShell('本地模型 · '+m.name);
+  var body=document.getElementById('m-body');
+  var actions=document.getElementById('m-actions');
+  body.innerHTML='<div class="mline muted">正在查询 '+esc(m.gguf)+' …</div>';
+  actions.innerHTML='<button class="mini" data-act="closeModal">关闭</button>';
+  var p;
+  try{
+    var res=await fetch(withToken('/api/models/gguf/plan?repo='+encodeURIComponent(m.gguf)+'&quant='+encodeURIComponent(m.quant)));
+    p=await res.json();
+    if(!res.ok){throw new Error(p.detail||('HTTP '+res.status));}
+  }catch(e){
+    body.innerHTML='<div class="mline"><span class="k">结果</span><span class="bad">拿不到这个模型的 GGUF</span></div>'+
+      '<div class="mline muted">'+esc(String((e&&e.message)||e))+'</div>';
+    return;
+  }
+  GGUF_PLAN=p;
+  // 已经下过了就不必再问一遍：直接填好，让他点下一步。
+  if(!p.needs_download){
+    document.getElementById('d-path').value=p.model_path;
+    PATH_FROM_CATALOG=false;
+    renderOriginHint();
+    body.innerHTML='<div class="mline"><span class="k">结果</span><span class="ok">本机已经有这个文件</span></div>'+
+      '<div class="mline muted">'+esc(p.model_path)+'</div>';
+    actions.innerHTML='<button class="primary" data-act="ggufDeploy">创建并启动</button>'+
+      '<button class="mini" data-act="closeModal">关闭</button>';
+    return;
+  }
+  body.innerHTML=
+    '<div class="mline"><span class="k">仓库</span>'+esc(p.repo)+'</div>'+
+    '<div class="mline"><span class="k">量化</span>'+esc(p.quant)+'</div>'+
+    '<div class="mline"><span class="k">文件</span>'+(p.files||[]).map(function(x){return esc(x.name);}).join('<br>')+'</div>'+
+    '<div class="mline"><span class="k">大小</span>'+humanBytes(p.bytes)+'</div>'+
+    '<div class="mline"><span class="k">下载到</span><span class="muted">'+esc(dirOf(p.model_path))+'</span></div>'+
+    '<div class="mline muted" style="margin-top:10px">主机固定为 huggingface.co；仓库名来自控制面目录（提示源，不是命令源）。确认无误再开始。</div>';
+  actions.innerHTML='<button class="primary" data-act="ggufGo">确认下载</button>'+
+    '<button class="mini" data-act="closeModal">取消</button>';
+}
+
+function ggufGo(){
+  var p=GGUF_PLAN; if(!p){return;}
+  var actions=document.getElementById('m-actions');
+  var log=document.getElementById('m-log');
+  log.style.display='block';log.textContent='';
+  var body=document.getElementById('m-body');
+  var old=document.getElementById('gguf-prog');
+  if(old){old.parentNode.removeChild(old);}
+  body.insertAdjacentHTML('beforeend',
+    '<div id="gguf-prog" style="margin-top:12px">'+
+    '<div style="height:8px;background:rgba(128,128,128,.3);border-radius:4px;overflow:hidden">'+
+    '<div id="gguf-bar" style="height:100%;width:0;transition:width .2s"></div></div>'+
+    '<div id="gguf-pct" class="muted" style="margin-top:6px">准备中…</div></div>');
+  actions.innerHTML='<span class="muted">正在下载，请不要关闭窗口</span>'+
+    '<button class="mini" data-act="ggufCancel">暂停</button>';
+  var append=function(l){log.textContent+=(log.textContent?'\n':'')+l;log.scrollTop=log.scrollHeight;};
+  if(GGUF_ES){GGUF_ES.close();}
+  GGUF_ES=new EventSource(withToken('/api/models/gguf/download?repo='+encodeURIComponent(p.repo)+'&quant='+encodeURIComponent(p.quant)));
+  GGUF_ES.onmessage=function(ev){
+    var m;try{m=JSON.parse(ev.data);}catch(e){return;}
+    if(m.type==='file'){append('下载 '+m.file+'（'+humanBytes(m.size)+'）');}
+    else if(m.type==='skip'){append('本机已有，跳过 '+m.file);}
+    else if(m.type==='progress'){
+      var pct=m.overall_total?Math.floor(m.overall_got*100/m.overall_total):0;
+      var bar=document.getElementById('gguf-bar'), txt=document.getElementById('gguf-pct');
+      if(bar){bar.style.width=Math.max(1,pct)+'%';}
+      if(txt){txt.textContent=pct+'%  '+humanBytes(m.overall_got)+' / '+humanBytes(m.overall_total);}
+    }
+    else if(m.type==='file-done'){append('完成 '+m.file);}
+    else if(m.type==='done'){
+      if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
+      append('');append('全部就绪：'+m.model_path);
+      document.getElementById('d-path').value=m.model_path;
+      PATH_FROM_CATALOG=false;
+      renderOriginHint();
+      actions.innerHTML='<button class="primary" data-act="ggufDeploy">创建并启动</button>'+
+        '<button class="mini" data-act="closeModal">关闭</button>';
+    }
+    else if(m.type==='error'){
+      if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
+      append('');append('下载失败：'+m.reason);
+      actions.innerHTML='<button class="primary" data-act="ggufGo">重试</button>'+
+        '<button class="mini" data-act="closeModal">关闭</button>';
+    }
+  };
+  GGUF_ES.onerror=function(){
+    if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
+    append('连接中断。已下载的部分会保留，重试即可续传。');
+    actions.innerHTML='<button class="primary" data-act="ggufGo">续传</button>'+
+      '<button class="mini" data-act="closeModal">关闭</button>';
+  };
+}
+
+function ggufCancel(){
+  if(GGUF_ES){GGUF_ES.close();GGUF_ES=null;}
+  document.getElementById('m-actions').innerHTML='<button class="primary" data-act="ggufGo">继续下载</button>'+
+    '<button class="mini" data-act="closeModal">关闭</button>';
+  var t=document.getElementById('gguf-pct');
+  if(t){t.textContent='已暂停 —— 已下载的部分保留，点「继续下载」接着下。';}
+}
+
+function ggufDeploy(){
+  closeModal();
+  createDeploy();
+}
+
 function renderOriginHint(){
   var el=document.getElementById('d-origin');
   if(!el){return;}
@@ -968,6 +1120,9 @@ function renderOriginHint(){
     } else {
       msg='将用本机文件启动：'+esc(val)+'。';
     }
+    // 还没准备好本机文件时，直接给一条出路。只说不做就是用户抱怨的那种「太不
+    // 方便」：知道缺什么，却还得自己去找仓库、挑量化、下载。
+    if(cls==='warn'){msg+=ggufHintHtml();}
   } else if(!PATH_FROM_CATALOG){
     el.style.display='none';el.textContent='';return;
   } else if(backend==='ollama'){

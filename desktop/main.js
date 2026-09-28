@@ -8,7 +8,10 @@ let local = null;
 
 async function createWindow() {
   // Deployments and their logs live in the app data directory, not the repo.
-  local = await start(0, { dataDir: app.getPath("userData") });
+  // Port 0 means "whatever is free", which is the right default: a predictable
+  // port is one any local page can find. Tests and debugging set MDP_PORT to pin
+  // it; nothing in the app depends on a particular number.
+  local = await start(Number(process.env.MDP_PORT) || 0, { dataDir: app.getPath("userData") });
   win = new BrowserWindow({
     width: 1080,
     height: 900,

@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { probe } = require("./probe");
 const { Deployments, safePort, portInUse } = require("./deploy");
+const ggufdl = require("./ggufdl");
 
 const SERVICE = (process.env.MDP_SERVICE || "http://127.0.0.1:8790").replace(/[/]+$/, "");
 const FRONTEND = path.join(__dirname, "..", "frontend", "index.html");
@@ -355,6 +356,51 @@ async function handle(req, res) {
       }) + "\n\n");
       res.end();
     }
+    return undefined;
+  }
+
+  // Resolve a catalog model to one GGUF file on HuggingFace, with its size, and
+  // WITHOUT downloading anything. The repo name comes from the control plane,
+  // which is a hint source and not trusted, so the user is shown repo + file +
+  // size and confirms before a byte moves. Host is pinned to huggingface.co in
+  // gguf.js; the repo id and the filename are both shape-checked there.
+  if (url.pathname === "/api/models/gguf/plan") {
+    if (method !== "GET") return methodNotAllowed(res, "GET");
+    if (requireToken(req, res, url)) return undefined;
+    try {
+      return send(res, 200, JSON.stringify(await ggufdl.plan(
+        url.searchParams.get("repo") || "", url.searchParams.get("quant") || "")));
+    } catch (e) {
+      return send(res, 400, JSON.stringify({ detail: String((e && e.message) || e) }));
+    }
+  }
+
+  // Same GET/SSE shape as the installer, for the same reason: this is a GET that
+  // writes to the user's disk, and the token is the only thing an <img> cannot
+  // forge. Without it any page could start a multi-gigabyte download.
+  if (url.pathname === "/api/models/gguf/download") {
+    if (method !== "GET") return methodNotAllowed(res, "GET");
+    if (requireToken(req, res, url)) return undefined;
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    // Writing to a socket the client already closed throws; a closed browser tab
+    // must not turn into an unhandled error halfway through a download.
+    let open = true;
+    res.on("close", () => { open = false; });
+    const frame = (o) => { if (open) { try { res.write("data: " + JSON.stringify(o) + "\n\n"); } catch (e) {} } };
+    try {
+      const done = await ggufdl.download(
+        url.searchParams.get("repo") || "", url.searchParams.get("quant") || "",
+        frame, () => !open);
+      frame({ type: "done", model_path: done.model_path,
+        files: done.files.map((f) => f.name) });
+    } catch (e) {
+      frame({ type: "error", reason: String((e && e.message) || e) });
+    }
+    res.end();
     return undefined;
   }
 
