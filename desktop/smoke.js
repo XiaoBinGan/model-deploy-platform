@@ -39,6 +39,21 @@ async function postJson(url, body) {
   return { status: r.status, body: await r.json().catch(() => null) };
 }
 
+// 8080 在本机是常客（Ollama、真跑起来的 llama-server 都爱它）。硬编码会让这个
+// 冒烟测试在已经部署了东西的机器上整片失败 —— 更糟的是，创建请求会先被
+// 「端口被占」拦下，于是「路径校验」那两条断言会被端口冲突的报错顺带满足，
+// 看起来通过，其实根本没走到被测的分支。要一个空闲端口。
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = require("node:net").createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
 async function waitSettled(base, id, seconds) {
   for (let i = 0; i < seconds; i += 1) {
     const d = (await getJson(base + "api/deployments/" + id)).body;
@@ -55,6 +70,7 @@ async function waitSettled(base, id, seconds) {
   await loadToken(base);
   console.log("local control plane:", base, "| data:", dataDir);
 
+  const port = await freePort();
   const health = await getJson(base + "api/health");
   check("health mode=desktop", health.body && health.body.mode === "desktop", JSON.stringify(health.body));
 
@@ -128,14 +144,14 @@ async function waitSettled(base, id, seconds) {
   // This used to be accepted and only failed at start, which left a row that
   // looked like a real deployment. It is refused at creation now (DESK-31).
   const bad = await postJson(base + "api/deployments",
-    { model_path: "/nonexistent/model.gguf", model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 });
+    { model_path: "/nonexistent/model.gguf", model_id: "qwen3-8b", backend: "llama.cpp", port });
   check("不存在的 gguf 在创建时就被拒，并说清原因",
     bad.status === 400 && String((bad.body || {}).detail || "").indexOf("本机") >= 0,
     bad.status + " " + JSON.stringify(bad.body));
 
   // The value the catalog used to fill in for llama.cpp.
   const repoId = await postJson(base + "api/deployments",
-    { model_path: "Qwen/Qwen3-8B", model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 });
+    { model_path: "Qwen/Qwen3-8B", model_id: "qwen3-8b", backend: "llama.cpp", port });
   check("HF 仓库 id 不能当 llama.cpp 的模型路径（且点名 HuggingFace）",
     repoId.status === 400 && String((repoId.body || {}).detail || "").indexOf("HuggingFace") >= 0,
     repoId.status + " " + JSON.stringify(repoId.body));
@@ -144,8 +160,8 @@ async function waitSettled(base, id, seconds) {
   const ggufPath = path.join(dataDir, "smoke.gguf");
   fs.writeFileSync(ggufPath, "placeholder");
   const good = (await postJson(base + "api/deployments",
-    { model_path: ggufPath, model_id: "qwen3-8b", backend: "llama.cpp", port: 8080 })).body;
-  check("create deployment", good && good.status === "CREATED" && good.port === 8080, good && good.id);
+    { model_path: ggufPath, model_id: "qwen3-8b", backend: "llama.cpp", port })).body;
+  check("create deployment", good && good.status === "CREATED" && good.port === port, good && good.id);
 
   const h = (await getJson(base + "api/deployments/" + good.id + "/health")).body || {};
   check("health reports unhealthy", h.healthy === false, h.error || h.status_code);

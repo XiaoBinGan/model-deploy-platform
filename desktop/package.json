@@ -7,14 +7,16 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node smoke.js && node test-mlx.js && node test-trust.js && node test-install.js && node test-docker.js && node test-server.js",
+    "test": "node smoke.js && node test-gguf.js && node test-mlx.js && node test-trust.js && node test-install.js && node test-docker.js && node test-server.js",
     "test:docker": "node test-docker.js",
     "test:server": "node test-server.js",
     "test:frontend": "electron test-frontend.js",
     "test:layout": "electron test-layout.js",
     "test:ui": "electron test-backend-ui.js",
     "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac"
+    "dist:mac": "electron-builder --mac",
+    "test:gguf": "node test-gguf.js",
+    "test:all": "node smoke.js && node test-gguf.js && node test-mlx.js && node test-trust.js && node test-install.js && node test-docker.js && node test-server.js && electron test-frontend.js && electron test-backend-ui.js && electron test-layout.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",

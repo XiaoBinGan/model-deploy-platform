@@ -91,6 +91,10 @@ function rawRequest(port, rawPath, method) {
   } = require("./probe");
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-server-test-"));
+  // DESK-32 的下载规划必须与这台机器的实际状态无关。默认落盘目录是
+  // ~/.mdp-models，用户一旦真的下过这个模型，plan 就会报 needs_download=false，
+  // 于是断言反过来失败 —— 这不是产品坏了，是测试偷看了机器状态。
+  process.env.MDP_GGUF_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-gguf-test-"));
   // Pre-seed a row that will be dropped on load (DESK-26), so the API outlet for
   // `rejected` is exercised rather than asserted from an always-empty array.
   fs.writeFileSync(path.join(dataDir, "deployments.json"), JSON.stringify({

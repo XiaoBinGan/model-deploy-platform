@@ -27,7 +27,9 @@ def test_require_local_only_returns_ready_checkpoints():
 
 
 def test_plan_command_is_argument_list():
-    out = preview(PlanRequest(model_id="qwen3-8b-awq", quantization="awq"))
+    # 这里原来是 qwen3-8b-awq，那个 id 早就不在目录里了；查询会走兜底路径
+    # 照样给出 vllm 命令，于是断言一直通过却没有真的覆盖到目录里的条目。
+    out = preview(PlanRequest(model_id="qwen3-8b", backend="vllm", quantization="awq"))
     assert out["command"][0] == "vllm"
     assert "--quantization" in out["command"]
 

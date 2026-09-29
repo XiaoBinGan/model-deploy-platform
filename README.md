@@ -1,270 +1,359 @@
 # 模型部署平台
 
-> 轻量级 LLM 推理部署控制面：检测宿主机环境 → 推荐模型（含量化变体） → 下载缺失模型 → 选择 vLLM / SGLang / Ollama / Transformers → 预览启动参数 → 执行部署 → 健康检查 → OpenAI 兼容 API 测试。
+**在一台什么都没装的机器上，从「打开应用」到「本地模型跑起来并能对话」，中间不需要 npm、不需要 pip、不需要记任何命令行。**
 
-平台本身不做推理、不加载权重。推理完全交给 vLLM / SGLang / Ollama / Transformers 子进程。
+下载一个 4.68 GB 的模型，本来是这样：去 HuggingFace 找仓库 → 在几十个文件里挑对量化 → 认出 `-00001-of-00002` 那种分片 → 下载 → 把绝对路径填进启动参数。
+这个项目把它变成点一下按钮。
 
----
+```
+点「新建部署」→ 选 Qwen3 8B → 点「⤓ 自动下载并部署」→ 确认
+    ↓
+Qwen/Qwen3-8B-GGUF / q4_k_m
+文件 Qwen3-8B-Q4_K_M.gguf · 4.68 GB → ~/.mdp-models/Qwen--Qwen3-8B-GGUF/
+    ↓
+进度条跑完 → 路径自动填好 → 「创建并启动」→ RUNNING
+    ↓
+/v1/chat/completions → "我是通义千问，一个由通义实验室开发的大规模语言模型…"
+```
 
-## 一、需求
-
-| 编号 | 需求 | 状态 |
-|------|------|------|
-| R1 | 部署完成后自动检测宿主机环境 | ✅ PASS |
-| R2 | 检测完成后推荐适合部署的模型（在线大模型决定 / 默认列表兜底，本地缺失时自动从 HuggingFace 或 ModelScope 下载） | ⚠️ PARTIAL |
-| R3 | 完成后可选择使用 SGLang 还是 vLLM 部署 | ✅ PASS |
-| R4 | 推荐部署参数预览，然后执行部署，输出测试页面和部署好的服务接口 | ⚠️ PARTIAL |
-| R5 | 推荐合适的启动参数配置，支持调整 | ✅ PASS |
-| R6 | 轻量级平台，平台本身不能太重 | ✅ PASS |
-
-### 需求细化
-
-**R1 — 环境检测**
-
-- GPU 型号、显存总量 / 空闲、驱动版本
-- CUDA Runtime、PyTorch CUDA 版本
-- Docker + NVIDIA Container Toolkit
-- WSL2 + GPU 映射
-- vLLM / SGLang / Transformers / Ollama 安装状态
-- CPU 核数、内存、磁盘剩余
-- 操作系统、Python 版本
-
-**R2 — 模型推荐**
-
-- 规则引擎为主：任务匹配 × 显存约束 × 量化策略 × 后端兼容
-- 在线大模型可插拔（未接入时自动降级为规则推荐）
-- 默认模型目录含 BF16 / FP8 / AWQ / GPTQ 量化变体
-- 本地缺失时标记 `download_required`，不伪装为 READY
-- 下载来源：HuggingFace + ModelScope
-
-**R3 — 后端选择**
-
-- vLLM、SGLang、Ollama、Transformers 四种后端；Apple Silicon (M 系列) 优先使用 Ollama 或 Transformers/MLX，不能按 CUDA 显卡处理
-- 自动检测已安装后端
-- 按兼容性评分推荐
-
-**R4 — 部署 + 测试**
-
-- 参数预览 → 用户确认 → 执行部署
-- 部署完成后输出：
-  - 服务地址 `http://127.0.0.1:{port}/v1`
-  - 健康检查地址
-  - 测试页面
-- OpenAI 兼容 API 测试
-
-**R5 — 参数规划**
-
-- 精度、上下文长度、并发数、显存利用率、量化方式
-- 实时显存估算 + 风险等级（PASS / WARNING / BLOCKED）
-- 用户可调整所有白名单参数
-- 命令预览（只读，折叠在高级选项中）
-
-**R6 — 轻量级**
-
-- 控制面依赖：`fastapi` + `uvicorn` + `pydantic`
-- 不把 `torch` / `transformers` / `vllm` / `sglang` 装入控制面环境
-- 前端无构建依赖：单文件 HTML + 原生 CSS + 原生 JS
-- SQLite 存储（第一版内存字典，可升级）
+上面这段不是设想。文件 **5,027,783,488 字节**、落盘魔数 `GGUF`、部署 `RUNNING`、真实推理返回上面那句 —— 都在 macOS（Apple M5 / 24 GB）上实测过。
 
 ---
 
-## 二、架构设计
+## 目录
+
+- [一、它是什么](#一它是什么)
+- [二、现在就有的能力](#二现在就有的能力)
+- [三、架构](#三架构)
+- [四、一键下载：难在哪](#四一键下载难在哪)
+- [五、安全模型：控制面是提示源，不是命令源](#五安全模型控制面是提示源不是命令源)
+- [六、项目结构](#六项目结构)
+- [七、快速开始](#七快速开始)
+- [八、测试](#八测试)
+- [九、API 参考](#九api-参考)
+- [十、模型目录与推荐决策](#十模型目录与推荐决策)
+- [十一、已验证 / 未验证](#十一已验证--未验证)
+- [十二、TODO](#十二todo)
+- [十三、技术栈与环境变量](#十三技术栈与环境变量)
+- [十四、文档索引](#十四文档索引)
+
+---
+
+## 一、它是什么
+
+两部分，职责完全分开：
+
+| | 控制面（`backend/`） | 桌面端（`desktop/`） |
+|---|---|---|
+| 是什么 | FastAPI 服务，无鉴权，可局域网访问 | Electron 应用，跑在用户自己的机器上 |
+| 管什么 | 环境档案、模型目录、推荐决策、参数规划 | 本机硬件探测、装后端、下模型、起进程 |
+| 信不信 | **不信**。它的输出一律当作提示 | 所有命令在本地拼、所有路径在本地校验 |
+
+平台本身**不做推理、不加载权重**。推理交给 Ollama / llama.cpp / MLX / Transformers / Docker 子进程，平台只负责「该跑哪个、参数是什么、起没起来、能不能答」。
+
+前三者是 Apple Silicon 的一等公民；vLLM / SGLang 是 CUDA 路径，官方不发 macOS wheel，平台会如实说「这台机器装不了」而不是给一个必然失败的按钮。
+
+---
+
+## 二、现在就有的能力
+
+### 硬件探测（macOS / Windows / Linux）
+
+- Apple Silicon：`sysctl hw.memsize` 拿统一内存，按 **UMA** 建模（不是独立 VRAM）
+- Windows：注册表 `HardwareInformation.qwMemorySize` 读显存（`Win32_VideoController.AdapterRAM` 是 uint32，>4 GB 会截断，所以不用它）
+- NVIDIA：`nvidia-smi`，PATH 不在时回退到 `%SystemRoot%\\System32` 与 `NVSMI` 目录
+- 集显 / 独显判定：按机型名归类（`Radeon 780M` 是集显、`Radeon R7 240` 不是）
+- Docker 能力探测（**只探测，不代替用户装**）
+
+### 推荐：不是显卡对照表，是纯函数 resolver
+
+输入实测硬件预算 + 每个模型的物理画像，输出「该推荐谁 + 为什么」，每条都带 `reason_key`。
+
+三条硬规矩：
+
+1. **只有完全驻留（zero-spill）才自动推荐。** 会溢出的模型照样渲染那一行并解释原因，但必须用户显式选择。
+2. **唯一硬拒绝是物理。** weights + 64K 上下文 + 运行时开销超过显存+内存才拒绝；补救是「换更小的量化」，不是「砍上下文」。**64K 是承诺，144K 是目标。**
+3. **速度只用于排序和设门，不作为展示值。** 速度是纯内存带宽模型 `tok/s ≈ 带宽 / (体积 × decode_fraction)`，MoE 的 `decode_fraction` 刻画「每 token 只读活跃专家」。
+
+这条规矩在统一内存上真的会改变结论：24 GB 的 M5 上，dense 14B 预测约 13.7 tok/s，低于 20 的舒适线，所以推荐落在 Qwen3-8B q4_k_m 或稀疏 30B-A3B 上，而不是「更大的那个」。
+
+### 一键安装缺失的后端
+
+点「本机未安装」→ 弹框说清**能不能装、走哪条路、装完是什么样** → 确认后执行。Linux/mac 走包管理器，Windows 走 winget。装不了的后端直接说装不了的原因。
+
+### 一键下载模型并部署
+
+见下一节。
+
+### 部署 + 真实健康检查 + 真实推理测试
+
+`/health` 是真的去连那个端口，不是读状态位；`/test` 是真的发一次 `/v1/chat/completions` 并把回复显示出来。
+
+---
+
+## 三、架构
 
 ```mermaid
 flowchart TB
-    User[用户浏览器]
+    User[用户]
 
-    subgraph ControlPlane[控制面 FastAPI]
-        Env[环境检测<br/>nvidia-smi · docker · wsl]
-        Catalog[模型目录<br/>HuggingFace · ModelScope · 本地扫描]
-        Recommend[推荐引擎<br/>规则评分 · 在线LLM]
-        Planner[参数规划器<br/>显存估算 → 命令生成 → 风险评估]
-        Deploy[部署编排器<br/>创建 → 校验 → 启动 → 健康检查 → RUNNING]
-        Runtime[运行时适配层<br/>vLLM · SGLang · Ollama · Transformers]
+    subgraph Desktop[Electron 桌面端 · 跑在用户机器上]
+        Probe[probe.js<br/>本机硬件探测]
+        LocalAPI[server.js<br/>主进程内同源 HTTP]
+        Deploy[deploy.js<br/>ollama / llama.cpp / mlx / docker]
+        GGUF[ggufdl.js<br/>HF 列文件 + 可续传下载]
+        Install[installers.js<br/>能力判定 + 卸载/安装计划]
     end
 
-    subgraph Host[宿主机]
-        GPU[GPU / CUDA / Driver]
-        DockerRT[Docker + NVIDIA Toolkit]
-        WSL[WSL2 + GPU 映射]
-        LocalModels[本地模型目录]
+    subgraph CP[控制面 FastAPI · 可共享]
+        Catalog[模型目录<br/>物理画像 + GGUF 仓库]
+        Resolver[resolver<br/>零溢出 → 速度设门 → 质量]
+        Planner[planner<br/>窗口阶梯 / KV 量化 / 命令数组]
     end
 
-    User --> ControlPlane
-    Env --> GPU
-    Env --> DockerRT
-    Env --> WSL
-    Catalog --> LocalModels
-    Env --> Planner
-    Catalog --> Recommend
-    Recommend --> Planner
-    Planner --> Deploy
-    Deploy --> Runtime
-    Runtime --> Host
+    Host[本机推理进程<br/>Ollama · llama.cpp · MLX · Docker]
+
+    User --> LocalAPI
+    LocalAPI --> Probe
+    LocalAPI --> Deploy
+    LocalAPI --> GGUF
+    LocalAPI --> Install
+    LocalAPI -->|只读：目录 / 推荐 / 规划| CP
+    Deploy --> Host
+    GGUF -->|huggingface.co| HF[(HuggingFace)]
 ```
 
-### Apple Silicon（Mac M 系列）
-
-- 通过 `platform.system()` / `platform.machine()` 和 `sysctl hw.memsize` 识别 Apple Silicon。
-- Apple GPU 使用 Metal，显存不是独立 VRAM，而是与 CPU 共享统一内存；规划时使用统一内存安全预算。
-- 不使用 `nvidia-smi`、CUDA、WSL2，也不将 CUDA 版 vLLM/SGLang 标记为可用。
-- 推荐后端：Ollama；已安装 PyTorch/Transformers 时可使用 Transformers。需要更高性能时可接入 MLX/MLX-LM。
-- Apple Silicon 推荐模型应优先选择 0.5B–14B 的 GGUF（Ollama）或 MLX 转换权重，而不是 AWQ/GPTQ/FP8 CUDA checkpoint。
-
-### 部署模式
-
-| 模式 | 适用场景 | 状态 |
-|------|---------|------|
-| 本地进程 | Linux / 已装推理环境 | ✅ Transformers 已验证 |
-| Docker | Windows + WSL2 / 生产 | 🟡 已实现（契约见 `docs/docker-design.md`）。容器生命周期**与真实推理**已在 macOS 上用真容器验证；**GPU 直通**与 CUDA 镜像未验证（见 T1） |
-| WSL2 | Windows + Linux 推理 | 🟡 已识别 WSL2（读 `/proc/version`），未在真机验证 |
-
-### 量化策略
-
-| 量化方式 | 后端兼容 | 显存 (8B 示例) | 推荐场景 |
-|---------|---------|--------------|---------|
-| BF16 | vLLM ✅ SGLang ✅ | ~18 GB | 质量优先 |
-| FP8 | vLLM ✅ SGLang ✅ | ~12 GB | 吞吐优先 |
-| AWQ INT4 | vLLM ✅ SGLang ✅ | ~9 GB | 低显存 |
-| GPTQ INT4 | vLLM ✅ SGLang ✅ | ~9 GB | 低显存 |
-| BitsAndBytes | Transformers only | N/A | 不推荐用于 vLLM/SGLang |
-
-**关键规则**：vLLM / SGLang 不支持运行时 BitsAndBytes 量化，必须使用预量化 AWQ/GPTQ/FP8 checkpoint。平台会对此进行 BLOCKED 校验。
+桌面端把本机硬件档案作为**请求参数**发给控制面。共享服务下控制面探测到的是*服务器*硬件，不是用户的机器 —— 所以 resolver 只吃一个 `HardwareBudget`，谁来提供都一样。
 
 ---
 
-## 三、项目结构
+## 四、一键下载：难在哪
+
+「下载一个 GGUF」听起来是个 HTTP GET。实际有四个坑，每个都真实踩到过：
+
+### 坑 1：HuggingFace 对不存在的仓库也返回 401
+
+```
+Qwen/this-repo-does-not-exist-xyz123     -> 401
+Qwen/Qwen2.5-VL-7B-Instruct-GGUF         -> 401   （需要授权，不是不存在）
+Qwen/Qwen3-8B-GGUF                       -> 200
+```
+
+**401 不能当作「仓库存在」的证据。** 所以目录里 22 个 GGUF 仓库全部按 HTTP 200 逐个核实；11 个门控模型（llama / gemma / phi / mistral / deepseek）指向公开的第三方 GGUF 仓库并重新核实。剩下 2 个 CUDA-only 条目没有 GGUF，如实留空 —— 界面会说「这个模型没有配置 GGUF 仓库」，而不是给个按不动的按钮。
+
+### 坑 2：文件名没有统一格式
+
+实测采集到的真实文件名，现在就是测试夹具：
+
+```
+qwen2.5-0.5b-instruct-q4_k_m.gguf               小写
+Llama-3.2-1B-Instruct-Q4_K_M.gguf               大写
+Mistral-Nemo-Instruct-2407.Q4_K_M.gguf          点分隔
+qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf  分片
+qwen2.5-coder-7b-instruct-q4_k_m.gguf           同一个仓库里
+qwen2.5-coder-7b-instruct-q4_k_m-00001-of-00002.gguf   既有单文件又有分片版
+mmproj-model-f16-4B.gguf                        多模态工程文件，不是模型
+```
+
+三条规则：
+
+1. **量化必须是完整 token。** `q4_k_m` 不能命中 `IQ4_K_M`（那是另一种量化）；匹配处前后都不能是字母数字。
+2. **有单文件就用单文件**，哪怕仓库同时提供分片版。
+3. **分片要凑齐。** 缺片时返回空让上层报错，不猜；`-m` 只给第一片，llama.cpp 自己会找其余的。
+
+`mmproj` 单独请求也拿不到 —— 把它当模型加载会以一种很难懂的方式失败。
+
+### 坑 3：下载会断
+
+先写 `.part`，中断后带 `Range` 接着下。服务器忽略 Range 而回了 200 时，**丢掉半截文件重新来**，而不是把整个新响应接到旧内容后面（那样会得到一个大小对、内容烂的文件）。
+
+### 坑 4：路径不是字符串，是磁盘写入
+
+`GET /api/models/gguf/download` 会**写磁盘** —— 而 GET 正是 `<img src=...>` 能触发的那一类。所以它和 `plan` 一样要本地 token，主机写死 `huggingface.co`，仓库 id 必须 `owner/name` 形状，文件名必须是单个 `.gguf` 基名（斜杠和 `..` 在表达层面就不可能）。
+
+而且：**下载不在点按钮时开始。** 先把仓库 / 文件 / 大小 / 目标目录摆出来，用户确认后才动。
+
+---
+
+## 五、安全模型：控制面是提示源，不是命令源
+
+这是整个设计里最不显眼、也最要紧的一条。
+
+**前提：控制面不可信。** 它可能被换掉、被中间人改写、或者本来就是别人搭的。但它会告诉桌面端「这个模型该用哪条命令启动」—— 如果照搬，一个恶意控制面就能让用户在**自己机器上**执行任意命令。
+
+所以：
+
+| 规则 | 做法 |
+|---|---|
+| 命令不接受 | 所有 argv 在本地拼，控制面只提供值（模型 id、量化、窗口），且每个值都过形状校验与白名单 |
+| 页面不接受 | CSP `default-src 'none'`，**每次响应一个随机 nonce**；模板里 nonce 占位符数量不对就直接 500 而不是发出一个弱策略 |
+| 本机服务不接受任意网页 | 本地 HTTP 校验 `Host` 必须是回环、`Origin` 若存在必须匹配，写操作还要一个**每进程随机 token**（页面里以内联方式注入） |
+| 模型路径不接受 | llama.cpp 的 `model_path` 必须是**本机存在的绝对路径**；填 HuggingFace 仓库 id 会在创建时就报错并点名原因，而不是起一个必然失败的进程 |
+| 端口不接受 | 创建时探测端口是否已被别的程序占用，占了就 400 说清楚，而不是起冲突 |
+
+信任边界有 40 条独立测试；CSP 的**真实边界**也实测过（挡得住外部脚本，挡不住内联注入 —— 所以内联事件处理器已全部清除，改成 `data-act` + 单个 `document` 监听器）。
+
+---
+
+## 六、项目结构
 
 ```
 model-deploy-platform/
-├── backend/
+├── backend/                          # 控制面：不装 torch / CUDA
 │   ├── app/
-│   │   ├── main.py                    # FastAPI 入口 + 路由 + 前端挂载
+│   │   ├── main.py                   # 路由 + 前端挂载（CSP nonce / API token 注入）
+│   │   ├── local_http.py             # 本机探测专用：trust_env=False（否则走系统代理）
 │   │   ├── services/
-│   │   │   ├── environment.py         # 宿主机环境检测（NVIDIA / Apple Silicon）
-│   │   │   ├── hardware.py            # HardwareBudget：实测硬件预算（含 UMA）
-│   │   │   ├── estimator.py           # 物理估算：footprint / physics_check / 速度模型
-│   │   │   ├── catalog.py             # 物理画像目录 + select_variant + recommended_entry resolver
-│   │   │   ├── models.py              # 推荐 API 外壳 + 本地 checkpoint 登记
-│   │   │   ├── planner.py             # 由拟合决策推导启动参数（窗口阶梯 / KV 量化 / FA）
-│   │   │   └── deployments.py         # 部署生命周期管理
-│   │   └── runtimes/
-│   │       ├── ollama_runtime.py      # Ollama 适配（OpenAI 兼容 API）
-│   │       ├── transformers_runtime.py # Transformers 适配
-│   │       └── transformers_server.py  # OpenAI 兼容推理服务
-│   ├── tests/
-│   │   ├── test_core.py               # 环境 / 推荐 API / 参数规划单测
-│   │   └── test_recommendation.py     # resolver 决策表 pin + 不变量
-│   └── requirements.txt              # fastapi, uvicorn, pydantic, httpx
-├── frontend/
-│   └── index.html                     # 单文件深色工作台 UI
-├── desktop/
-│   ├── main.js                        # Electron 主进程（单实例锁、窗口安全基线）
-│   ├── server.js                      # 主进程内同源 HTTP 控制面（无 CORS / 无 PNA 预检）
-│   ├── deploy.js                      # 本地部署执行：ollama / llama.cpp / mlx / docker
-│   ├── probe.js                       # 本机硬件探测（macOS / Windows / Linux + WSL）
-│   ├── installers.js                  # 后端可用性判定与一键安装计划
-│   └── electron-builder.yml           # 打包配置（dmg / nsis / AppImage）
-├── scripts/
-│   └── smoke_test.py                 # API 冒烟测试
-├── .env.example
-├── .gitignore
-└── README.md
+│   │   │   ├── catalog.py            # 24 个模型的物理画像 + GGUF 仓库
+│   │   │   ├── estimator.py          # footprint / physics_check / 带宽速度模型
+│   │   │   ├── hardware.py           # HardwareBudget（含 UMA）
+│   │   │   ├── profiles.py           # 客户端档案解析 / 钳制 / 档案码
+│   │   │   ├── gpu_table.py          # GPU 型号 → 显存 / UMA 查表
+│   │   │   ├── planner.py            # 窗口阶梯 / KV 量化 / 命令数组
+│   │   │   ├── models.py             # 推荐 API 外壳 + 本地 checkpoint 登记
+│   │   │   └── deployments.py        # 部署生命周期
+│   │   └── runtimes/                 # Ollama / Transformers 适配
+│   └── tests/                        # 18 个测试文件，203 条
+├── desktop/                          # Electron 桌面端
+│   ├── main.js                       # 单实例锁、窗口安全基线
+│   ├── server.js                     # 主进程内同源 HTTP（无 CORS、无 PNA 预检）
+│   ├── probe.js                      # macOS / Windows / Linux 硬件探测
+│   ├── deploy.js                     # ollama / llama.cpp / mlx / docker 执行 + 本地校验
+│   ├── gguf.js                       # 挑文件：量化匹配 / 分片 / 排除 mmproj（纯函数）
+│   ├── ggufdl.js                     # HF 列文件 + 可续传流式下载
+│   ├── installers.js                 # 后端能力判定 + 安装计划
+│   ├── smoke.js                      # 端到端冒烟（含可选真实推理）
+│   └── test-*.js                     # 9 个测试文件
+├── frontend/index.html               # 单文件深色工作台（无构建步骤）
+└── docs/                             # 设计 + QA 报告
 ```
 
 ---
 
-## 四、API 参考
+## 七、快速开始
+
+### 桌面端（推荐）
+
+```bash
+cd desktop
+npm install
+npm start
+```
+
+窗口自己会在主进程里起一个同源 HTTP 服务（随机端口），不需要另外开控制面。首次启动会探测本机硬件、列出可用的后端与推荐模型。
+
+打包：
+
+```bash
+npm run dist:mac     # dmg
+```
+
+### 控制面（可单独跑，可共享）
+
+```bash
+cd backend
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8790
+```
+
+打开 `http://127.0.0.1:8790`。
+
+### 局域网访问
+
+监听 `0.0.0.0`，同网段可直接打开，API 与前端同源。部署接口返回的 `endpoint` 按**调用方请求的 Host** 生成，所以局域网客户端看到的是 `http://<本机IP>:<port>/v1`。
+
+> ⚠️ 控制面**无鉴权**，能创建/启动/停止进程。只在可信网络暴露。
+> 非本机请求创建部署默认 403（模型会落到服务器而不是用户机器），单租户可信机器可设 `MDP_ALLOW_REMOTE_DEPLOY=1`。
+
+---
+
+## 八、测试
+
+**711 条检查**，其中相当一部分是「真去连、真去下、真去推理」而不是打桩。
+
+```bash
+cd backend && .venv/bin/python -m pytest -q      # 203
+cd desktop && npm test                           # 303（7 个 node 套件）
+cd desktop && npm run test:all                   # 448（+ 3 个 Electron 套件）
+```
+
+| 套件 | 条数 | 说明 |
+|---|---:|---|
+| `backend/tests/`（18 个文件） | 203 | 推荐决策表（像 golden file 一样 pin 住）、规划器、部署契约、信任边界、Windows 探测、CSP nonce |
+| `desktop/smoke.js` | 24 | 端到端：起服务 → 探测 → 建部署 → 健康检查 → 删除；`--ollama <模型>` 追加真实推理往返 |
+| `desktop/test-gguf.js` | 31 | 挑 GGUF：量化整体匹配、分片凑齐、单文件优先、排除 mmproj |
+| `desktop/test-trust.js` | 40 | 恶意控制面给的命令不被执行；所有 argv 都是本地拼的 |
+| `desktop/test-install.js` | 59 | 后端可装性判定（按平台 / 架构 / 包管理器） |
+| `desktop/test-docker.js` | 89 | Docker 后端契约、镜像探测、端口冲突 |
+| `desktop/test-server.js` | 104 | 本机 HTTP 层：token、来源校验、请求体上限、代理；含**真连 HuggingFace** 的下载规划 |
+| `desktop/test-mlx.js` | 16 | MLX 启动参数随 mlx-lm 版本演进 |
+| `desktop/test-frontend.js` | 124 | 页面：事件委托、CSP 下无内联处理器、下载流程、提示文案 |
+| `desktop/test-backend-ui.js` | 15 | 后端下拉只列真能跑的 |
+| `desktop/test-layout.js` | 6 | 窗口自适应（不是固定宽度） |
+
+### 变异测试
+
+关键规则都用「拆掉它，看测试是否真的会红」验证过 —— 只看测试通过数是不够的。DESK-32 的 7 条变异全部被抓：
+
+```
+分片不再让位于单文件   -> 3 条失败
+量化不再要求整体匹配   -> 1 条失败
+不再排除 mmproj        -> 1 条失败
+不再校验仓库 id 形状   -> 4 条失败
+提示里不再挂按钮       -> 4 条失败
+不再区分是不是桌面端   -> 1 条失败
+plan 端点不再要 token  -> 1 条失败
+```
+
+变异过程本身也挖出过真 bug：分片分组循环把解析结果直接当非空用，不变式是隐式的，一旦破坏就是**崩溃**而不是失败 —— 已改成跳过解析不出来的项。
+
+---
+
+## 九、API 参考
 
 ### 环境
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/environment/latest` | 获取最新环境检测报告 |
+|---|---|---|
+| GET | `/api/environment/latest` | 最新环境检测报告 |
 | POST | `/api/environment/scan` | 触发重新扫描 |
 
 ### 模型
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/models/catalog` | 默认模型目录（含量化变体） |
+|---|---|---|
+| GET | `/api/models/catalog` | 模型目录（物理画像 + GGUF 仓库） |
 | GET | `/api/models/local` | 本地已下载模型扫描 |
-| GET | `/api/models/ollama` | Ollama 已安装模型列表 |
-| POST | `/api/models/recommend` | 规则推荐，请求体见下方 |
-
-推荐请求：
+| GET | `/api/models/ollama` | Ollama 已安装模型 |
+| POST | `/api/models/recommend` | 推荐（请求体见下） |
 
 ```json
 {
-  "task": "chat",
-  "goal": "balanced",
-  "concurrency": 4,
-  "available_vram_gb": null,
-  "backend": "ollama",
-  "prefer_quantized": null,
-  "require_local": false,
-  "limit": 20,
-  "live": false,
+  "task": "chat", "goal": "balanced", "concurrency": 4,
+  "available_vram_gb": null, "backend": "ollama",
+  "require_local": false, "limit": 20, "live": false,
   "hardware": {
-    "source": "browser",
-    "platform": "darwin",
-    "architecture": "arm64",
-    "cpu_cores": 10,
-    "ram_gb": 24,
+    "source": "browser", "platform": "darwin", "architecture": "arm64",
+    "cpu_cores": 10, "ram_gb": 24,
     "gpus": [{"name": "Apple M4 Pro", "vendor": "apple", "vram_gb": null, "uma": true}]
   }
 }
 ```
 
-### 客户端硬件（共享服务）
-
-共享服务下服务端探测到的是**服务器**硬件，不是用户的机器。因此硬件档案作为**请求参数**传入，
-resolver 仍然只吃一个 `HardwareBudget`：
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/hardware/self` | 服务器自身档案（显式标注 source=server） |
-| GET | `/api/hardware/gpus` | GPU 型号 → 显存 / UMA 查表（浏览器读不到显存） |
-| POST | `/api/hardware/resolve` | 校验并钳制客户端档案 → budget + warnings |
-| POST | `/api/hardware/parse` | 解析档案码或粘贴的 JSON |
-| POST | `/api/hardware/profile-code` | 把档案编码成可粘贴的档案码 |
-| GET | `/api/hardware/probe.py` | 本机精确探测脚本（只读，打印 JSON） |
-| GET | `/api/hardware/probe-command` | 按请求 base URL 生成一行探测命令 |
-
-推荐响应新增字段：`client_is_local`、`hardware_source`、`hardware_trusted`、
-`hardware_warnings`、`normalized_profile`。
-
-**远端部署守卫**：非本机请求创建部署默认返回 403（模型会落到服务器而不是用户机器）。
-如需放开（单租户可信机器）设置 `MDP_ALLOW_REMOTE_DEPLOY=1`。
-同机通过局域网 IP 访问仍视为本机。
-
-### 浏览器探测的边界
-
-浏览器**读不到显存**，`deviceMemory` 只有粗档位且封顶 8GB、Safari/Firefox 不支持。
-所以：
-
-1. 显存由 **GPU 型号查表**得到，并标记为不可信；
-2. Apple Silicon 的统一内存需要**用户确认内存档位**；
-3. 精确检测靠本机执行 `probe.py` 后把 JSON 或档案码粘回页面。
-
-详见 `docs/client-hardware-detection.md`。
-
-- `available_vram_gb`：留空时使用实测 `HardwareBudget`（Apple Silicon 走 `sysctl` 统一内存）。
-- `live=true`：用当前空闲内存定价（启动前拟合）；默认 `false` 用总容量减 margin 定价（避免已加载模型把每一行都算成放不下）。
-- `limit`：返回行数上限，默认 20。
-
-推荐响应关键字段：
+响应关键字段：
 
 ```json
 {
   "mode": "resolver",
   "hardware": {"usable_vram_gb": 19.2, "total_device_gb": 24.0, "uma": true, "source": "sysctl"},
-  "recommendation": {"id": "qwen3-8b", "quantization": "q4_k_m", "zero_spill": true, "reason_key": "speed-gated-quality"},
-  "reason_key": "speed-gated-quality",
+  "recommendation": {"id": "qwen3-8b", "quantization": "q4_k_m", "zero_spill": true,
+                     "reason_key": "speed-gated-quality"},
   "reason": "更高质模型未达速度舒适线，已按速度设门后选出最优",
   "recommendations": [
-    {"id": "qwen3-8b", "recommended": true, "quantization": "q4_k_m", "zero_spill": true, "fits": true, "reason_key": "zero-spill-resident"},
-    {"id": "qwen3-14b", "recommended": false, "quantization": "q4_k_m", "zero_spill": true, "fits": true, "reason_key": "zero-spill-resident"}
+    {"id": "qwen3-8b", "recommended": true, "zero_spill": true, "fits": true,
+     "reason_key": "zero-spill-resident"},
+    {"id": "qwen3-14b", "recommended": false, "zero_spill": true, "fits": true,
+     "reason_key": "zero-spill-resident"}
   ],
   "total_candidates": 24
 }
@@ -272,383 +361,142 @@ resolver 仍然只吃一个 `HardwareBudget`：
 
 每一行都带 `reason_key`；溢出的行 `zero_spill=false` 但仍然可见，`fits=false` 的行带 `refusal` 说明物理原因。
 
-### 参数规划
+### 客户端硬件（共享服务）
+
+服务端探测到的是服务器硬件。所以硬件档案作为**请求参数**传入，resolver 只吃一个 `HardwareBudget`。
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/plans/preview` | 参数预览 + 显存估算 + 命令生成 |
+|---|---|---|
+| GET | `/api/hardware/self` | 服务器自身档案（标注 source=server） |
+| GET | `/api/hardware/gpus` | GPU 型号 → 显存 / UMA 查表（浏览器读不到显存） |
+| POST | `/api/hardware/resolve` | 校验并钳制客户端档案 |
+| POST | `/api/hardware/parse` | 解析档案码或粘贴的 JSON |
+| POST | `/api/hardware/profile-code` | 把档案编码成可粘贴的档案码 |
+| GET | `/api/hardware/probe.py` | 本机精确探测脚本（只读，打印 JSON） |
+| GET | `/api/hardware/probe.ps1` | Windows 版探测脚本（不依赖 Python） |
+| GET | `/api/hardware/probe-command` | 按请求 base URL 生成一行探测命令 |
 
-### 部署
+**浏览器探测的边界**：`deviceMemory` 只有粗档位且封顶 8 GB，Safari / Firefox 不支持。所以显存由 **GPU 型号查表**得到并标记不可信；Apple Silicon 的统一内存需要**用户确认档位**；精确检测靠本机执行探测脚本后粘回 JSON 或档案码。详见 `docs/client-hardware-detection.md`。
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/backends` | 检测可用后端 |
-| POST | `/api/deployments` | 创建部署 |
-| POST | `/api/deployments/{id}/start` | 启动部署 |
-| POST | `/api/deployments/{id}/stop` | 停止部署 |
-| GET | `/api/deployments` | 列出所有部署 |
-| GET | `/api/deployments/{id}` | 获取部署详情 |
-| GET | `/api/deployments/{id}/health` | 对运行中服务做真实健康检查（不是状态位） |
-| POST | `/api/deployments/{id}/test` | 发送真实 OpenAI 兼容 chat completion 并返回回复 |
-
-部署流程（前端「新建部署」→「服务测试」）：
-
-```
-选择 resolver 推荐的模型
-  → POST /api/deployments           创建（ollama 固定 11434，model_path = ollama 标签）
-  → POST /api/deployments/{id}/start 启动（ollama 预加载 / transformers 子进程）
-  → GET  /api/deployments/{id}/health 真实健康检查
-  → POST /api/deployments/{id}/test   真实 /v1/chat/completions
-  → POST /api/deployments/{id}/stop   停止（ollama 卸载模型）
-```
-
-### 健康检查
+### 桌面端本地端点（主进程内，需 token）
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/health` | 平台自身健康检查 |
+|---|---|---|
+| GET | `/api/health` | `mode=desktop` |
+| GET | `/api/hardware/self` | 本机真实档案 |
+| GET | `/api/backends` | 本机可用后端 |
+| GET | `/api/models/gguf/plan` | 查仓库文件、报真实大小与目标路径 |
+| GET | `/api/models/gguf/download` | **SSE** 流式下载（可续传） |
+| POST | `/api/deployments` | 创建（含路径 / 端口本地校验） |
+| POST | `/api/deployments/{id}/start` | `/stop` | 启动 / 停止 |
+| GET | `/api/deployments/{id}/health` | **真实**健康检查（连端口，不读状态位） |
+| POST | `/api/deployments/{id}/test` | **真实** `/v1/chat/completions` |
 
----
+### 完整部署流程
 
-## 五、快速开始
-
-### 启动后端
-
-```bash
-cd backend
-python -m pip install -r requirements.txt
-
-# 仅本机
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8790
-
-# 局域网可访问
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8790
 ```
-
-### 打开界面
-
-- 本机：`http://127.0.0.1:8790/`
-- 局域网：`http://<本机IP>:8790/`
-
-查看本机 IP：
-
-```bash
-ipconfig getifaddr en0        # macOS Wi-Fi/有线
-hostname -I                   # Linux
-```
-
-### 局域网访问
-
-- 平台监听 `0.0.0.0`，同一网段的机器可直接打开界面，API 与前端同源。
-- 已启用 CORS（`allow_origins=["*"]`），便于其他客户端直接调用 API。
-- 部署接口返回的 `endpoint` 会按**调用方请求的 Host** 生成，因此局域网客户端看到的是 `http://<本机IP>:<port>/v1`，而不是只有本机能用的 `127.0.0.1`。
-- 推理服务本身也要监听 `0.0.0.0` 才能被局域网调用。Ollama 默认即监听 `*:11434`；若只绑定了回环，用 `OLLAMA_HOST=0.0.0.0 ollama serve` 启动。
-- **安全提示**：这是无鉴权的控制面，能创建/启动/停止进程。只在可信网络暴露，或加反向代理鉴权，不要直接映射到公网。
-
-### 运行测试
-
-```bash
-cd backend
-python -m pytest -q
-```
-
-### 冒烟测试
-
-先启动后端，然后：
-
-```bash
-python scripts/smoke_test.py
+选推荐模型
+  → POST /api/deployments              创建（本地校验路径绝对且存在、端口未被占）
+  → POST /api/deployments/{id}/start    启动
+  → GET  /api/deployments/{id}/health   真实健康检查
+  → POST /api/deployments/{id}/test     真实 chat completion
+  → POST /api/deployments/{id}/stop     停止
 ```
 
 ---
 
-## 六、默认模型目录
+## 十、模型目录与推荐决策
 
-| 模型 ID | 基座 | 精度 | 量化 | 显存 | 后端 |
-|---------|------|------|------|------|------|
-| qwen25-05b-instruct | Qwen2.5-0.5B | BF16 | — | 1.2 GB | vLLM, SGLang, Transformers |
-| qwen3-1.7b-bf16 | Qwen3-1.7B | BF16 | — | 4.5 GB | vLLM, SGLang |
-| qwen3-4b-bf16 | Qwen3-4B | BF16 | — | 10 GB | vLLM, SGLang |
-| qwen3-8b-bf16 | Qwen3-8B | BF16 | — | 18 GB | vLLM, SGLang |
-| qwen3-8b-fp8 | Qwen3-8B | FP8 | FP8 | 12 GB | vLLM, SGLang |
-| qwen3-8b-awq | Qwen3-8B | INT4 | AWQ | 9 GB | vLLM, SGLang |
-| qwen3-8b-gptq | Qwen3-8B | INT4 | GPTQ | 9 GB | vLLM, SGLang |
-| qwen25-coder-7b-awq | Qwen2.5-Coder-7B | INT4 | AWQ | 8.5 GB | vLLM, SGLang |
-| qwen25-14b-awq | Qwen2.5-14B | INT4 | AWQ | 15.5 GB | vLLM, SGLang |
-| qwen25-32b-awq | Qwen2.5-32B | INT4 | AWQ | 22 GB | vLLM, SGLang |
-| deepseek-r1-distill-qwen-7b | DeepSeek-R1-Distill-Qwen-7B | BF16 | — | 16 GB | vLLM, SGLang |
-| llama-3.1-8b-bf16 | Llama-3.1-8B | BF16 | — | 18 GB | vLLM, SGLang |
-| mistral-7b-awq | Mistral-7B-v0.3 | INT4 | AWQ | 8.5 GB | vLLM, SGLang |
-| gemma-3-4b-bf16 | Gemma-3-4B | BF16 | — | 10 GB | vLLM, SGLang |
-| phi-4-mini-bf16 | Phi-4-mini | BF16 | — | 9.5 GB | vLLM, SGLang |
+24 个条目。**22 个带核实过的 GGUF 仓库**，全部能一键下载；剩下 2 个是 CUDA-only（vLLM / SGLang 专用），如实标注没有 GGUF。
 
-### 推荐决策（借鉴 Hermes-Agent resolver）
+| 基座 | 参数 | 原生上下文 | 后端 | 量化 |
+|---|---:|---:|---|---|
+| Qwen2.5 0.5B | 0.5 B | 32K | llama.cpp, mlx, ollama, transformers | q4_k_m, q8_0, mlx-4bit |
+| Llama 3.2 1B | 1 B | 128K | llama.cpp, mlx, ollama, transformers | q4_k_m, q8_0, mlx-4bit |
+| Qwen2.5 1.5B | 1.5 B | 32K | llama.cpp, mlx, ollama, transformers | q4_k_m, q8_0, mlx-4bit |
+| Llama 3.2 3B | 3 B | 128K | llama.cpp, mlx, ollama, transformers | q4_k_m, q8_0, mlx-4bit |
+| Qwen2.5 3B | 3 B | 32K | llama.cpp, mlx, ollama, transformers | q4_k_m, q8_0, mlx-4bit |
+| Gemma 3 4B | 4 B | 128K | 全部六种 | 全部 |
+| Phi-4-mini | 3.8 B | 128K | 全部六种 | 全部 |
+| Mistral 7B | 7 B | 32K | 全部六种 | 全部 |
+| Qwen2.5 7B | 7 B | 32K | 全部六种 | 全部 |
+| Qwen2.5-Coder 7B | 7 B | 32K | 全部六种 | 全部 |
+| Qwen3 8B | 8 B | 32K | 全部六种 | 全部 |
+| DeepSeek-R1 7B | 7 B | 32K | 全部六种 | 全部 |
+| InternLM3 8B | 8 B | 32K | 全部六种 | 全部 |
+| Llama 3.1 8B | 8 B | 128K | 全部六种 | 全部 |
+| Qwen2.5-VL 7B | 7 B | 32K | 全部六种 | 全部 |
+| Mistral Nemo 12B | 12 B | 128K | 全部六种 | 全部 |
+| Qwen2.5 14B | 14 B | 32K | 全部六种 | 全部 |
+| Qwen3 14B | 14 B | 32K | 全部六种 | 全部 |
+| **Qwen3 30B-A3B（MoE）** | 30 B | **256K** | 全部六种 | 全部 |
+| Qwen2.5 32B | 32 B | 32K | 全部六种 | 全部 |
+| Qwen3 32B | 32 B | 32K | 全部六种 | 全部 |
+| DeepSeek-R1 32B | 32 B | 32K | 全部六种 | 全部 |
+| Qwen2.5-VL 7B · AWQ/GPTQ | 8 B | 32K | sglang, vllm | awq, gptq, fp8, bf16 |
+| Phi-4-mini · AWQ/GPTQ | 3.8 B | 128K | sglang, vllm | awq, gptq, fp8, bf16 |
 
-推荐不是一张「显卡 → 模型」的硬编码对照表，而是一个**纯函数 resolver**：
+### resolver 的分支
 
 ```
-输入：实测 HardwareBudget + 目录中每个模型的物理画像
-输出：该机器该推荐谁 + reason_key
-
-候选 = physics_check 通过的条目
-  否 → 不参与自动推荐，仅保留可见 + 可解释（spill-visible / physics-refused）
-  是 → zero_spill ？weights + 64K KV + 运行时开销 全进设备内存
-        否 → 不参与自动推荐，仅可显式选择
-        是 → predicted_decode_tok_s >= 20 ？
-              是 → 在合格池里取 max(quality, -size)
-                    存在 quality 更高但被速度淘汰的条目 → speed-gated-quality
-                    否则 → best-quality-resident
-              否 → 取驻留中最快的 → fastest-resident
+候选 = physics_check 通过？
+  否 → 不参与自动推荐，仅可见 + 可解释（physics-refused）
+  是 → zero_spill？（weights + 64K KV + 运行时开销全进设备内存）
+        否 → 不参与自动推荐，仅可显式选择（spill-visible）
+        是 → predicted_decode_tok_s >= 20？
+              是 → 合格池里取 max(quality, -size)
+                    存在 quality 更高但被速度淘汰的 → speed-gated-quality
+                    否则                          → best-quality-resident
+              否 → 驻留中最快的 → fastest-resident
 ```
 
-三条硬规矩：
-
-1. **只有完全驻留（zero-spill）才自动推荐**；会溢出的模型仍然渲染那一行并解释原因，但必须由用户显式选择。
-2. **唯一硬拒绝是物理**：weights + 64K 上下文 + 运行时开销超过 VRAM+RAM 才拒绝；补救永远是「换更小的量化」，不是「砍上下文」。64K 是承诺，144K 是目标。
-3. **速度只用于排序和设门**，不是展示值。速度是纯内存带宽模型：
-   `tok/s ≈ 带宽 / (构建体积 × decode_fraction)`，带宽用类别常数（离散卡 1000 GB/s、统一内存 210 GB/s、溢出 80 GB/s），MoE 的 `decode_fraction` 刻画「每 token 只读活跃专家」。
-
-`reason_key` 枚举：`best-quality-resident` / `speed-gated-quality` / `fastest-resident` / `no-recommendation`，以及逐行的 `zero-spill-resident` / `spill-visible` / `physics-refused` / `backend-incompatible`。前端只渲染 resolver 真正命中的那个分支，不重新推导。
+`reason_key` 枚举：`best-quality-resident` / `speed-gated-quality` / `fastest-resident` / `no-recommendation`，逐行还有 `zero-spill-resident` / `spill-visible` / `physics-refused` / `backend-incompatible`。**前端只渲染 resolver 真正命中的那个分支，不重新推导。**
 
 ### 决策表（`tests/test_recommendation.py` 像 golden file 一样 pin 住）
 
 | 预算 | 离散卡（vllm/sglang） | 统一内存 UMA（ollama/llama.cpp） |
 |---:|---|---|
-| 16 GB | 更小的量化可驻留则推荐，否则无推荐 | 小模型驻留；8B q8_0 低于舒适线 → 降精度到 q4_k_m |
+| 16 GB | 更小的量化能驻留就推荐，否则无推荐 | 小模型驻留；8B q8_0 低于舒适线 → 降精度到 q4_k_m |
 | 24 GB | 30B-A3B AWQ 驻留且快 | Qwen3-8B q4_k_m · speed-gated-quality |
 | 32–128 GB | 稀疏 MoE 胜出 | 稀疏 MoE 胜出（dense 14B/32B 在 210 GB/s 下低于舒适线） |
 | 512 GB | dense 32B 仍被速度设门，MoE 胜出 | 同上 |
 
-这张表就是 resolver 存在的理由：**统一内存 24–128 GB 这一列**——dense 14B 在 210 GB/s 下预测约 13.7 tok/s，低于 20 的舒适线，所以稀疏 30B-A3B 或更小的 q4_k_m 胜出。
+这张表就是 resolver 存在的理由：**统一内存 24–128 GB 这一列**。dense 14B 在 210 GB/s 下预测约 13.7 tok/s，低于 20 的舒适线，所以稀疏 30B-A3B 或更小的 q4_k_m 胜出。
 
 ---
 
-## 七、执行方案
+## 十一、已验证 / 未验证
 
-### Phase 0 — 架构冻结 ✅
+这一节按「证据来自哪里」分开写，不混在一起。
 
-- API 契约
-- 数据模型
-- 默认模型目录
-- 量化策略
-- 兼容规则
+### macOS（Apple M5 / 24 GB / arm64）本机实测
 
-### Phase 1 — 垂直切片 ✅
+| 项目 | 证据 |
+|---|---|
+| 硬件探测 | `sysctl` 统一内存；`Apple M5 / arm64 / 10 cores / 24 GB / uma:true` |
+| **一键下载 GGUF** | `Qwen/Qwen3-8B-GGUF` → `Qwen3-8B-Q4_K_M.gguf`，**5,027,783,488 字节**，落盘魔数 `GGUF`，目标 `~/.mdp-models/Qwen--Qwen3-8B-GGUF/` |
+| **llama.cpp 真实部署** | 上一步的模型 → `RUNNING` on 8080 → `/health` 200 → `/v1/chat/completions` 返回真实文本 |
+| Ollama 真实部署 | `qwen3.5:9b` → RUNNING → health 200 → chat 200 |
+| MLX 真实部署 | `mlx-lm 0.31.3`（Metal 可用）+ 4-bit 权重，真实补全 |
+| Docker 真实推理 | 真 llama.cpp 容器 + 4.7 GB GGUF → 补全 200（CPU，无 GPU） |
+| thinking 模型空回复 | 截断时回退到 `reasoning` 并给出提示，不再是空白 |
+| 端口冲突 | 8080 已被真实部署占用时，创建请求返回 400 并说清原因 |
 
-已打通的链路：
+### 未验证 / 不可能 —— 不要当成已完成
 
-```
-真实环境扫描 (nvidia-smi)
-  → 本地模型扫描 (config.json + safetensors)
-  → 规则推荐 (含量化变体)
-  → 参数预览 (显存估算 + 命令数组)
-  → 前端展示
-```
+| 项目 | 状态 |
+|---|---|
+| **在 Windows 真机上跑过** | ❌ 一次都没有。代码 + 纯函数单测 + 静态审查都有，见 W1–W11 |
+| **vLLM / SGLang 原生（macOS）** | 🚫 不可能，官方不发 macOS wheel |
+| Docker **GPU 直通** | 🚫 macOS 上无法验证（容器是 Linux 虚拟机且拿不到 GPU） |
 
-### Phase 2 — Transformers 后端 ✅
+#### 其他未验证项
 
-```
-创建部署 → subprocess 启动 transformers_server
-  → 模型加载 → /health 成功
-  → /v1/models 成功
-  → /v1/chat/completions 成功
-  → 前端测试页展示回复
-```
-
-### Phase 3 — Ollama 后端 ✅
-
-```
-检测 Ollama → 列出已安装模型
-  → 创建部署 → 预加载模型
-  → /v1/chat/completions (OpenAI 兼容)
-  → 停止 → 卸载模型
-```
-
-### Phase 4 — 模型下载器 📋
-
-```
-模型不存在 → HuggingFace / ModelScope 下载
-  → 校验完整性 → 登记本地模型
-  → 进入部署流程
-```
-
-当前状态：API 预留，未实现真实下载。下载受 `HF_HUB_OFFLINE` 环境变量阻塞。
-
-### Phase 5 — vLLM / SGLang 🟡
-
-```
-真实 vLLM subprocess → /health → /v1/chat/completions
-真实 SGLang subprocess → /health → /v1/chat/completions
-```
-
-当前状态：命令生成已实现。**原生 subprocess 仍未实现，且在本机（Apple Silicon）不可能实现**——
-vLLM / SGLang 官方只发 `manylinux` 的 x86_64 / aarch64 wheel，没有 macOS 版本，
-源码又依赖 CUDA / ROCm 内核，在 macOS 上编译不过。
-
-Mac 上真正对标 vLLM 的是 MLX，已实现并**做过真实端到端验证**（`desktop/deploy.js`
-的 `_runMlx`，走 `mlx_lm.server`）。
-
-验证条件与结果（Apple M5）：`mlx-lm 0.31.3` / `mlx 0.32.2`，`mx.metal.is_available()`
-为 `True`；权重 `mlx-community/Qwen2.5-0.5B-Instruct-4bit`（4-bit）。走应用自己的
-`_runMlx`，实际 argv 是：
-
-```
-~/.mdp-mlx/bin/python -m mlx_lm server \
-  --model mlx-community/Qwen2.5-0.5B-Instruct-4bit --host 127.0.0.1 --port <port>
-```
-
-`/health` 200 → `/v1/chat/completions` 200（1.1s，返回真实生成文本）→ stop 后子进程确实
-不存在。**没有传** `--kv-bits`：0.31.3 的 `--help` 里没有这个选项（与已知事实一致），
-传了会以 exit code 2 退出。
-
-**未验证**：`--kv-bits` 分支需要有该选项的新版 mlx-lm（本机装的没有）；Intel Mac
-（MLX 只在 Apple Silicon 上可用）。
-
-> **一个必须知道的陷阱**：`mlx_lm.server` 在权重存在**之前**就绑定端口，`/health` 由
-> 「生成线程活着」支撑，所以首次部署时它会一边下载一边答 200。此时直接发补全会
-> **永久挂起且不报错**（实测 180s 超时，服务端日志里连这条请求都没有）。
-> 桌面端已经补偿了这一点：它不把 `/health` 200 当作 RUNNING，而是发一个 1-token 补全
-> **逼出真实加载**，等到真应答才报 RUNNING；30 分钟装不下才判 FAILED，并且每 30 秒
-> 写一条「仍在加载权重…已等待 Ns」。见 `deploy.js` 的 `_warmup()`。
-Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
-
-### Phase 6 — Docker / WSL2 🟡
-
-```
-同一套 Plan → Docker 容器执行 / WSL2 内执行
-```
-
-当前状态：**Docker 部署已实现**，接口契约冻结在 `docs/docker-design.md`。
-
-- 控制面只做规划：`planner.py` 的 docker 分支返回 `docker run` argv 预览，**不执行容器**
-  （控制面可能在另一台机器上）。
-- 桌面端负责执行：`_dockerArgv` 本地拼 argv（信任边界：服务端只贡献一个窗口整数），
-  `_runDocker` 起容器；生命周期按契约 §4.1，启动前 / 停止后 / 删除时各一次 `docker rm -f`。
-- 镜像由用户指定，专属参数按**镜像名子串**决定（含 vllm / 含 sglang / 其它用自带 CMD），
-  不按 backend 决定。
-
-已处理的平台事实：
-
-- macOS 上容器拿不到 GPU。这不是推断，是实测：`docker run --gpus all` 直接报
-  `could not select device driver "" with capabilities: [[gpu]]`，容器里没有
-  `/dev/dri`、没有 `/dev/nvidia*`，`docker info` 显示运行时是 `linux` 的虚拟机。
-  桌面端启动 docker 部署时会写 WARNING，**不假装能用 GPU**。
-- Linux（+ nvidia-container-toolkit）与 Windows（Docker Desktop 的 WSL2 后端）**能**直通。
-  vLLM/SGLang 在这两种机器上提供**一键拉取官方镜像**（`docker pull`，单个步骤），
-  拉完镜像已在本地时不再重复提供，并在弹框里给出「用 docker 后端部署」直接跳到部署表单。
-  详见 `docs/docker-design.md` §0.1。
-- Linux 的 Docker 安装**不提供一键命令**：装 Docker Engine 需要 root 且各发行版命令不同，
-  而 `curl https://get.docker.com | sh` 是管道执行，违反「argv 数组、不过 shell」的信任边界。
-- WSL2 检测读 `/proc/version`（而不是「有没有 `wsl` 命令」），避免把 WSL 的内存限额当宿主机内存。
-
-已经验证的（容器生命周期 + **真实推理**）：
-
-- **真实推理链路跑通了**。用应用的 docker 后端部署官方 llama.cpp server 镜像，
-  挂载本机一个真实的 4.7 GB GGUF（qwen2.5:7b），走完 create → start → RUNNING →
-  health 200 → `POST /v1/chat/completions` 200，模型返回了真实回复：
-  「我是运行在阿里云的大型语言模型平台上。」
-  整条 argv 由桌面端本地拼装（`extra_args` 传 `-m /blobs/... --host 0.0.0.0 --port 8080`），
-  控制面没有参与任何可执行内容。**这是 macOS 上的 CPU 路径**，也证明了
-  「非 vllm/sglang 镜像走自带 CMD + extra_args」这条契约分支真的可用。
-  复现命令见 `docs/docker-design.md` §0.2。
-- 用应用真实跑通了「拉镜像 → 启动容器 → `docker rm -f` 清理」：容器确实以
-  `mdp-<部署 id>` 为名、按推导出的端口映射运行，删除后 `docker ps -a` 为空。
-
-未验证的部分（不要当成已完成）：
-
-- **GPU 直通本身**：开发机是 macOS（Apple M5），没有 NVIDIA 显卡，
-  容器根本拿不到 GPU，所以「`--gpus all` 在 Linux/Windows 上真的生效」只在文档与
-  `gpuPath()` 的说明里，**没有在真机跑过**。上面跑通的是 CPU 路径。
-- **CUDA 推理镜像**：`vllm/vllm-openai` / `lmsysorg/sglang` 仍然**没有跑过**。
-  它们需要 GPU 直通，而本机没有，所以「一键拉取这两个镜像之后能不能真的起来」
-  依旧未验证 —— 包括在 Linux/Windows 上。
-- Windows nsis 安装包配置已写，但**没有在 Windows 上构建或运行过**。
-
----
-
-## 八、验收标准
-
-> **下表是原作者在另一台机器（Windows + RTX 5090）上的验收记录，不是 macOS 的证据。**
-> 其中「Ollama / Transformers 真实部署」那两行的 ✅ 来自那台 CUDA 机器。
-> macOS（Apple M5）上的复核结果单列在下方，「本机」一列指 macOS。
-
-| 验收项 | 状态 | 说明 |
-|--------|------|------|
-| 平台启动 | ✅ PASS | `uvicorn` 正常启动，监听 8790 |
-| 浏览器访问 | ✅ PASS | 首页渲染，导航可用 |
-| 真实 GPU 检测 | ✅ PASS | RTX 5090 / 32GB / Driver 581.29 |
-| 本地模型扫描 | ✅ PASS | config.json + safetensors 识别 |
-| 模型目录 | ✅ PASS | 含 BF16/FP8/AWQ/GPTQ 变体 |
-| 规则推荐 | ✅ PASS | 量化模型在低显存/吞吐场景排名优先 |
-| 参数预览 | ✅ PASS | 显存估算 + 命令数组 + 风险等级 |
-| BitsAndBytes 拦截 | ✅ PASS | vLLM/SGLang 下返回 BLOCKED |
-| Ollama 真实部署 | ✅ PASS | /v1/chat/completions 返回模型回复 |
-| Transformers 真实部署 | ✅ PASS | subprocess 启动 + /health + /v1/chat |
-| vLLM 真实部署 | 🚫 BLOCKED | 主机未安装 vLLM |
-| SGLang 真实部署 | 🚫 BLOCKED | 主机未安装 SGLang |
-| 模型下载 | 🚫 BLOCKED | HF_HUB_OFFLINE 限制 |
-| 单元测试 | ✅ PASS | 4 passed |
-| 冒烟测试 | ✅ PASS | SMOKE PASS |
-
-### macOS（Apple M5）上的复核
-
-| 验收项 | 状态 | 说明 |
-|--------|------|------|
-| 硬件探测 | ✅ 本机实测 | `sysctl` 统一内存；`Apple M5 / arm64 / 10 cores / 24 GB / uma:true` |
-| Ollama 真实部署 | ✅ 本机实测 | `qwen3.5:9b` → RUNNING → `/health` 200 → `/v1/chat/completions` 200，返回真实文本 |
-| MLX 真实部署 | ✅ 本机实测 | `mlx-lm 0.31.3`（Metal 可用）+ 4-bit 权重，走 `_runMlx`，真实补全 |
-| thinking 模型空回复 | ✅ 本机实测 | 截断时回退到 `reasoning` 并给出提示，不再是空白 |
-| Docker 真实推理 | ✅ 本机实测 | 真 llama.cpp 容器 + 4.7 GB GGUF → 补全 200（CPU，无 GPU） |
-| Docker GPU 直通 | 🚫 无法验证 | macOS 容器是 Linux 虚拟机且拿不到 GPU |
-| vLLM / SGLang 原生 | 🚫 不可能 | 官方不发 macOS wheel |
-
-### 不允许冒充完成的项
-
-以下不能作为"真实部署完成"的依据：
-
-- 前端构建成功
-- Python 语法正确
-- 单元测试通过
-- 假进程启动成功
-- 固定 Demo 页面
-- 命令字符串生成成功
-
----
-
-## 九、技术栈
-
-| 层 | 技术 | 说明 |
-|----|------|------|
-| 后端 | FastAPI + Uvicorn + Pydantic | 控制面，不装 torch/CUDA |
-| 前端 | 原生 HTML + CSS + JS | 单文件，无构建依赖 |
-| 存储 | 内存字典 → SQLite | 第一版足够 |
-| 推理 | vLLM / SGLang / Ollama / Transformers | 子进程，平台不加载权重 |
-| 检测 | nvidia-smi + shutil.which + importlib | 无额外依赖 |
-
----
-
-## 十、环境变量
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `HF_HUB_OFFLINE` | unset | 设为 `1` 时 HuggingFace 下载被禁用 |
-| `HF_ENDPOINT` | hf-mirror.com | HuggingFace 镜像 |
-| `MODEL_ROOTS` | G:/models;/models | 本地模型扫描根目录 |
-
----
-
-## 十一、后续演进
-
-| 版本 | 目标 |
-|------|------|
-| v0.3 | 模型下载器（HF + ModelScope） |
-| v0.4 | vLLM subprocess 真实部署 |
-| v0.5 | SGLang subprocess 真实部署 |
-| v0.6 | Docker / WSL2 模式 |
-| v0.7 | SSE 实时部署日志 |
-| v0.8 | 性能测试（TTFT / 吞吐 / P95） |
-| v1.0 | 多 GPU + 远程节点 |
-| v2.0 | Kubernetes + 多模型路由 |
+| # | 项目 | 现状 |
+|---|---|---|
+| T1 | Docker 容器生命周期**与真实推理** | 🟡 已在 macOS 用真容器验证；**GPU 直通**与 CUDA 镜像（vLLM / SGLang）未验证 |
+| T2 | macOS 打包公证（notarization） | 未做。`electron-builder --dir --mac` 能构建，代码签名自动跳过 |
+| T3 | Windows `nsis` 安装包 | 配置已写（x64），未在 Windows 上构建/安装/运行 |
 
 ---
 
@@ -664,7 +512,7 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 | # | 项目 | 现状 | 需要在真机上做什么 |
 |---|---|---|---|
 | W1 | 整条 `probeWindows()` 路径 | 仅静态审查 + 纯函数单测 | 在真 Windows 上跑一次硬件探测，与 `systeminfo` / 任务管理器对照 |
-| W2 | 注册表读显存 `HardwareInformation.qwMemorySize`（REG_QWORD） | 按已知事实实现（`Win32_VideoController.AdapterRAM` 是 uint32，>4 GB 会截断，所以不用它） | 在显存 >4 GB 的机器上确认读到的值与实际一致 |
+| W2 | 注册表读显存 `HardwareInformation.qwMemorySize`（REG_QWORD） | 按已知事实实现（`AdapterRAM` 是 uint32，>4 GB 会截断，所以不用它） | 在显存 >4 GB 的机器上确认读到的值与实际一致 |
 | W3 | `windowsGpuIsUma()` 集显判定 | 纯函数测了 30+ 个机型名 | 收集**真实机器上报的 GPU 字符串**（OEM / 驱动差异很大）复核；老 APU 与移动独显的边界最需要验 |
 | W4 | `classifyGpuVendor()` | 同上 | 确认 Windows 上报的 vendor 字符串能被正确归类 |
 | W5 | `nvidia-smi` 不在 PATH 时的回退 | 已实现三条路径（PATH / `%SystemRoot%\System32` / `NVSMI` 目录） | 在没有把 nvidia-smi 加进 PATH 的机器上确认回退生效 |
@@ -682,10 +530,52 @@ Windows / Linux 上想跑 vLLM 走 Docker（见 Phase 6）。
 - 老一代 APU：`Radeon HD 8650G` / `Radeon R7 Graphics` —— 曾被判成独显
 - **不能误判**成集显的：`Radeon HD 7970`、`Radeon R7 240`、`Radeon R7 M260`、`Arc A770M`
 
-### 其他未验证项
+### 已知缺口
 
-| # | 项目 | 现状 |
+- **GGUF 仓库名来自控制面。** 主机和形状都能校验，但**不能**校验「这个仓库里的这个文件真的是那个模型」—— 恶意控制面可以指向另一个 4 GB 的 gguf。目前的防线是下载前把仓库 / 文件 / 大小摆给用户看，由人判断。要真正解决需要控制面签名。
+- **没有完整性校验。** 下载完不比对 sha256（HF API 里有 `lfs.oid` 可用）。
+- **下载前不检查磁盘空间。** 20 GB 的模型可能下到一半才发现没地方放。
+- **mlx / docker / ollama 的模型获取没有统一。** 只有 llama.cpp 有这条一键链路。
+- **控制面无鉴权。**
+- **macOS GUI 启动的 app 拿不到 Homebrew 的 PATH**（系统只给 `/usr/bin:/bin:/usr/sbin:/sbin`）。
+
+---
+
+## 十三、技术栈与环境变量
+
+| 层 | 技术 | 说明 |
 |---|---|---|
-| T1 | Docker **真实容器集成** | 🟡 大部分完成。容器生命周期**与真实推理**都已在 macOS 上用真容器验证（real llama.cpp server + 4.7 GB GGUF，见 Phase 6）；**GPU 直通**与 CUDA 镜像（vLLM/SGLang）仍未验证 |
-| T2 | macOS 打包产物公证（notarization） | 未做。`npx electron-builder --dir --mac` 能构建，代码签名自动跳过 |
+| 控制面 | FastAPI + Uvicorn + Pydantic | 不装 torch / CUDA |
+| 桌面端 | Electron（`contextIsolation` + `sandbox` + `execFile`） | 不用 shell，不给渲染进程 Node |
+| 前端 | 原生 HTML + CSS + JS | 单文件，**无构建步骤** |
+| 存储 | 内存字典 + JSON 文件 | 第一版足够 |
+| 推理 | Ollama / llama.cpp / MLX / Transformers / Docker | 子进程，平台不加载权重 |
+| 检测 | `sysctl` / 注册表 / `nvidia-smi` / `shutil.which` | 无额外依赖 |
 
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `HF_HUB_OFFLINE` | unset | 设为 `1` 时 HuggingFace 下载被禁用 |
+| `HF_ENDPOINT` | hf-mirror.com | HuggingFace 镜像 |
+| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | unset | 门控仓库下载用 |
+| `MODEL_ROOTS` | G:/models;/models | 本地模型扫描根目录 |
+| `MDP_GGUF_DIR` | `~/.mdp-models` | GGUF 下载落盘目录 |
+| `MDP_PORT` | 随机 | **仅测试/调试**用；默认随机是为了让本机其他页面猜不到 |
+| `MDP_ALLOW_REMOTE_DEPLOY` | unset | 设为 `1` 允许非本机请求创建部署 |
+
+---
+
+## 十四、文档索引
+
+| 文档 | 内容 |
+|---|---|
+| `docs/trust-boundary.md` | 控制面 → 本地执行的信任边界完整设计 |
+| `docs/client-hardware-detection.md` | 浏览器探测的边界与档案码方案 |
+| `docs/docker-design.md` | Docker 后端契约 |
+| `docs/probe-session-design.md` | 本机探测协议 |
+| `docs/qa-findings.md` | QA 汇总（67 条，三个子代理独立报告） |
+| `docs/qa-findings-backend.md` | 后端 24 条 |
+| `docs/qa-findings-desktop.md` | 桌面端 28 条 |
+| `docs/qa-findings-frontend.md` | 前端 15 条 + 后续 DESK-29 / 30 / 31 / 32 |
+| `docs/qa-round3.md` | 独立验证轮 |
+| `docs/windows-gaps.md` | Windows 缺口逐条 |
+| `docs/vllm-deployment-gaps.md` | vLLM 部署缺口 |
