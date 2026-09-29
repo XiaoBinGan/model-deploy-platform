@@ -145,8 +145,12 @@ const allTools = () => Promise.resolve(true);
     Object.values(probed.unavailable || {}).every((v) => typeof v.gpu === "string"));
 
   const seen = [];
+  // /bin/echo and /bin/sh do not exist on Windows, so these two steps used to
+  // fail with ENOENT there and the "returns the real exit code" assertions could
+  // never pass. The step runner is platform-neutral; run node itself instead, so
+  // the same behaviour is measured on every platform.
   const okCode = await d._runInstallStep(
-    { note: "回显", argv: ["/bin/echo", "hello-from-install"] },
+    { note: "回显", argv: [process.execPath, "-e", "console.log('hello-from-install')"] },
     (line) => seen.push(line),
   );
   check("成功步骤返回 0", okCode === 0, "code=" + okCode);
@@ -154,7 +158,7 @@ const allTools = () => Promise.resolve(true);
   check("步骤跑完从 procs 里摘掉", d.procs.size === 0, "size=" + d.procs.size);
 
   const failCode = await d._runInstallStep(
-    { note: "失败", argv: ["/bin/sh", "-c", "exit 3"] },
+    { note: "失败", argv: [process.execPath, "-e", "process.exit(3)"] },
     () => {},
   );
   check("失败步骤返回真实退出码", failCode === 3, "code=" + failCode);

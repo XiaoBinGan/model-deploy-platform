@@ -31,7 +31,14 @@ const MAX_PORT = 65535;
 const DEFAULT_DOCKER_IMAGE = "vllm/vllm-openai:latest";
 const DOCKER_IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$/;
 const GPUS_RE = /^[0-9]+(,[0-9]+)*$/;
-const VOLUME_PATH_RE = /^\/[^:\u0000]{0,400}$/;
+// A bind-mount source lives on this machine, so it may be a POSIX path or a
+// Windows one (drive letter or UNC). The container side is always Linux.
+// Requiring "/" on both made every Windows host path look relative: `C:\models`
+// was rejected with "必须是绝对路径" even though it *is* absolute, and
+// test-docker.js aborted after 11 of 89 checks because mkdtempSync returns
+// exactly that shape.
+const VOLUME_HOST_RE = /^(?:\/|\\\\|[A-Za-z]:[\\/])[^:\u0000]{0,400}$/;
+const VOLUME_CONTAINER_RE = /^\/[^:\u0000]{0,400}$/;
 const MAX_VOLUMES = 8;
 const MAX_EXTRA_ARGS = 32;
 const MAX_EXTRA_ARG_LEN = 200;
@@ -51,6 +58,42 @@ const INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
 
 function nowIso() {
   return new Date().toISOString().replace(/[.][0-9]{3}Z$/, "Z");
+}
+
+// Child-process output is NOT UTF-8 on Windows: a console program writes in the
+// active code page (CP936 on a Chinese install), while everything this app emits
+// is UTF-8. Decoding those bytes as UTF-8 turned every Chinese line into
+// replacement characters, so a failed `ollama pull` showed the user mojibake
+// instead of the reason. Per-chunk decoding can still split a multi-byte
+// character across two chunks; a per-process streaming decoder would fix that
+// too, but progress lines are not worth the extra state.
+const WINDOWS_OEM_ENCODING = (() => {
+  if (process.platform !== "win32") return null;
+  // TextDecoder only knows named encodings; these are the code pages that
+  // actually turn up (Chinese Windows is 936). Anything else stays null and
+  // falls back to a lossy UTF-8 read rather than throwing.
+  const labels = { "936": "gbk", "950": "big5", "932": "shift_jis", "949": "euc-kr", "866": "ibm866", "1251": "windows-1251", "1252": "windows-1252" };
+  try {
+    const cp = String(require("node:child_process").execFileSync("chcp", { encoding: "utf8", timeout: 3000, windowsHide: true })).match(/(\d+)/);
+    return cp ? labels[cp[1]] || null : null;
+  } catch (e) {
+    return null;
+  }
+})();
+
+// Never throws: this runs inside stream data handlers, where an exception would
+// take the whole deployment down over a decoding detail.
+function decodeChunk(buf) {
+  if (buf === undefined || buf === null) return "";
+  if (typeof buf === "string") return buf;
+  if (WINDOWS_OEM_ENCODING) {
+    try {
+      return new TextDecoder(WINDOWS_OEM_ENCODING).decode(buf);
+    } catch (e) {
+      // Fall through to the UTF-8 read.
+    }
+  }
+  return Buffer.from(buf).toString("utf8");
 }
 
 // A context window below 1K is meaningless and one above 1M would try to
@@ -238,11 +281,11 @@ function validateDockerFields(req) {
   if (volumes.length > MAX_VOLUMES) throw new Error("volumes 最多 " + MAX_VOLUMES + " 条");
   const vols = volumes.map((v, i) => {
     if (!isPlainObject(v)) throw new Error("volumes[" + i + "] 必须是对象");
-    if (typeof v.host !== "string" || !VOLUME_PATH_RE.test(v.host)) {
-      throw new Error("volumes[" + i + "].host 必须是绝对路径");
+    if (typeof v.host !== "string" || !VOLUME_HOST_RE.test(v.host)) {
+      throw new Error("volumes[" + i + "].host 必须是绝对路径（POSIX /… 或 Windows C:\\… / UNC）：" + v.host);
     }
-    if (typeof v.container !== "string" || !VOLUME_PATH_RE.test(v.container)) {
-      throw new Error("volumes[" + i + "].container 必须是绝对路径");
+    if (typeof v.container !== "string" || !VOLUME_CONTAINER_RE.test(v.container)) {
+      throw new Error("volumes[" + i + "].container 必须是容器内的绝对路径（以 / 开头）：" + v.container);
     }
     if (v.ro !== undefined && typeof v.ro !== "boolean") {
       throw new Error("volumes[" + i + "].ro 必须是布尔");
@@ -729,7 +772,7 @@ class Deployments {
       }, INSTALL_TIMEOUT_MS);
 
       const onData = (buf) => {
-        String(buf).replace(/\r/g, "").split("\n").forEach((line) => {
+        decodeChunk(buf).replace(/\r/g, "").split("\n").forEach((line) => {
           const text = line.trim();
           if (text) onLine(text.slice(0, 300));
         });
@@ -989,7 +1032,7 @@ class Deployments {
     item.pid = proc.pid;
 
     const onData = (buf) => {
-      const text = String(buf).replace(/\r/g, "").trim();
+      const text = decodeChunk(buf).replace(/\r/g, "").trim();
       if (!text) return;
       // Our own warmup timeout closes the connection while the server is still
       // downloading, so it fails to write its response and prints a long
@@ -1158,7 +1201,7 @@ class Deployments {
     item.pid = proc.pid;
 
     const onData = (buf) => {
-      const text = String(buf).replace(/\r/g, "").trim();
+      const text = decodeChunk(buf).replace(/\r/g, "").trim();
       if (text) this._log(item, text.split("\n").pop());
     };
     proc.stdout.on("data", onData);
@@ -1271,7 +1314,7 @@ class Deployments {
         finish();
       }, PULL_TIMEOUT_MS);
       const onData = (buf) => {
-        const text = String(buf).replace(/\r/g, "").trim();
+        const text = decodeChunk(buf).replace(/\r/g, "").trim();
         if (text) this._log(item, text.split("\n").pop());
       };
       proc.stdout.on("data", onData);
@@ -1323,7 +1366,7 @@ class Deployments {
     item.pid = proc.pid;
 
     const onData = (buf) => {
-      const text = String(buf).replace(/\r/g, "").trim();
+      const text = decodeChunk(buf).replace(/\r/g, "").trim();
       if (text) this._log(item, text.split("\n").pop());
     };
     proc.stdout.on("data", onData);

@@ -205,7 +205,9 @@ def test_backend_probes_use_local_http_not_bare_httpx():
     for path in root.rglob('*.py'):
         if path.name == 'local_http.py':
             continue
-        text = path.read_text()
+        # 源码是 UTF-8；不写 encoding 时 pathlib 会跟随 locale（Windows 中文
+        # 环境是 cp936），在源码里遇到非 ASCII 字节就 UnicodeDecodeError。
+        text = path.read_text(encoding="utf-8")
         if 'httpx.get(' in text or 'httpx.post(' in text:
             offenders.append(str(path.relative_to(root)))
     assert offenders == [], f'这些文件直接用了 httpx，应改走 local_http: {offenders}'

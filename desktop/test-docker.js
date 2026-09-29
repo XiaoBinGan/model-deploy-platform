@@ -116,6 +116,39 @@ function buildFakeDocker(dir) {
     '',
   ];
   fs.writeFileSync(path.join(dir, "fake_docker.js"), lines.join(NL));
+  // The shim has to be something the platform can actually execute, because
+  // deploy.js spawns the bare name "docker" with shell:false. On POSIX a
+  // "#!/bin/sh" wrapper works. On Windows it does not: Node resolves only exact
+  // names plus the .exe suffix, so a shebang file is ENOENT and a .cmd is
+  // EINVAL — which is exactly why this suite used to abort after 11 of 89
+  // checks. Copying node.exe into place as "docker.exe" gives a real PE binary
+  // that runs fake_docker.js through a --require bootstrap.
+  if (process.platform === "win32") {
+    const boot = path.join(dir, "docker-bootstrap.js");
+    // node.exe is invoked as `docker.exe run --rm ...`, so the subcommand lands
+    // in argv[1] — the slot node treats as the script path. The bootstrap
+    // rebuilds the POSIX argv shape fake_docker.js expects, and the child's cwd
+    // is a directory of empty files named after each subcommand so node's own
+    // main-module resolution finds something instead of throwing
+    // MODULE_NOT_FOUND.
+    fs.writeFileSync(boot, [
+      '"use strict";',
+      "const p = require(\"node:path\");",
+      "const script = p.join(__dirname, \"fake_docker.js\");",
+      "const sub = p.basename(String(process.argv[1] || \"\"));",
+      "process.argv = [process.argv[0], script, sub].concat(process.argv.slice(2));",
+      "require(script);",
+    ].join(NL));
+    const workDir = path.join(dir, "cwd");
+    fs.mkdirSync(workDir, { recursive: true });
+    for (const sub of ["run", "info", "rm", "images", "pull", "ps", "inspect", "version"]) {
+      fs.writeFileSync(path.join(workDir, sub), "" + NL);
+    }
+    fs.copyFileSync(process.execPath, path.join(bin, "docker.exe"));
+    // NODE_OPTIONS is read by the copied node.exe; nothing else in the suite
+    // relies on the environment here.
+    return { bin, nodeOptions: "--require " + boot, workDir };
+  }
   const shim = path.join(bin, "docker");
   fs.writeFileSync(shim, [
     "#!/bin/sh",
@@ -123,18 +156,29 @@ function buildFakeDocker(dir) {
     "",
   ].join(NL));
   fs.chmodSync(shim, 0o755);
-  return bin;
+  return { bin, nodeOptions: "", workDir: null };
 }
 
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdp-docker-"));
   const savedPath = process.env.PATH;
-  const savedHome = process.env.HOME;
+  // os.homedir() prefers USERPROFILE on Windows and HOME elsewhere, so seeding
+  // only HOME made _hfCachePath() point at the real profile on Windows.
+  const homeKeys = ["HOME", "USERPROFILE"];
+  const savedHome = {};
+  for (const k of homeKeys) savedHome[k] = process.env[k];
   const fakeHome = path.join(dir, "home");
   fs.mkdirSync(fakeHome, { recursive: true });
-  process.env.HOME = fakeHome;
-  const fakeBin = buildFakeDocker(dir);
-  process.env.PATH = fakeBin + path.delimiter + savedPath;
+  for (const k of homeKeys) process.env[k] = fakeHome;
+  const fake = buildFakeDocker(dir);
+  const savedNodeOptions = process.env.NODE_OPTIONS;
+  // On Windows the copied node.exe resolves its "main module" from argv[1]
+  // against the child's cwd, so the empty stub files must be in cwd. Nothing in
+  // this suite depends on the working directory, and it is restored in finally.
+  const savedCwd = process.cwd();
+  process.env.PATH = fake.bin + path.delimiter + savedPath;
+  if (fake.nodeOptions) process.env.NODE_OPTIONS = fake.nodeOptions;
+  if (fake.workDir) process.chdir(fake.workDir);
 
   try {
     const d = new Deployments(path.join(dir, "data"), "");
@@ -257,10 +301,12 @@ function buildFakeDocker(dir) {
     // --- HF cache mkdir failure only warns ---------------------------------
     const fileAsHome = path.join(dir, "home-file");
     fs.writeFileSync(fileAsHome, "x");
-    process.env.HOME = fileAsHome;
+    // _hfCachePath() reads os.homedir(), which is USERPROFILE on Windows: both
+    // names have to point at the file for the mkdir to fail on either platform.
+    for (const k of homeKeys) process.env[k] = fileAsHome;
     let badHf = null;
     try { badHf = mk({ port: 18100 }); } catch (e) { badHf = { log: ["threw: " + e.message] }; }
-    process.env.HOME = fakeHome;
+    for (const k of homeKeys) process.env[k] = fakeHome;
     check("HF 目录建不出来时只告警不阻断",
       badHf && (badHf.log || []).some((l) => l.indexOf("无法创建 HuggingFace") >= 0),
       (badHf && badHf.log || []).join(" | "));
@@ -452,7 +498,7 @@ function buildFakeDocker(dir) {
       JSON.stringify(callsAfterDelete.slice(-1)));
 
     // --- detectBackends ----------------------------------------------------
-    process.env.PATH = fakeBin + path.delimiter + savedPath;
+    process.env.PATH = fake.bin + path.delimiter + savedPath;
     const be = await new Deployments(path.join(dir, "ddata-detect"), "").detectBackends();
     check("守护进程活着时 docker 可部署", be.backends.indexOf("docker") >= 0, JSON.stringify(be.backends));
     check("可部署的 docker 不列在 installable", !be.installable.docker, JSON.stringify(Object.keys(be.installable)));
@@ -510,11 +556,23 @@ function buildFakeDocker(dir) {
     // --- R3-04: a child that ignores SIGTERM must still be killed ----------
     // Every fake process in this suite exits on SIGTERM, so the SIGKILL branch
     // of _kill() was never exercised. This child deliberately ignores it.
+    //
+    // On Windows there is no SIGTERM: Node maps kill("SIGTERM") onto
+    // TerminateProcess, which is immediate and uncatchable, so the "ignores
+    // SIGTERM" child dies at once and the grace-period assertion cannot hold.
+    // The product behaviour that matters — the child does not survive — still
+    // must, so assert that unconditionally and only assert the grace period
+    // where a catchable signal exists.
     {
       const { spawn } = require("node:child_process");
+      // NODE_OPTIONS carries the fake-docker bootstrap on Windows; the stubborn
+      // child is a plain node script and must not load it (it would exit at
+      // once, and "alive_before" would be false for the wrong reason).
+      const childEnv = Object.assign({}, process.env);
+      delete childEnv.NODE_OPTIONS;
       const stubborn = spawn(process.execPath,
         ["-e", "process.on('SIGTERM',function(){}); setInterval(function(){},1000);"],
-        { stdio: "ignore" });
+        { stdio: "ignore", env: childEnv });
       await sleep(300);
       const aliveBefore = stubborn.exitCode === null && !stubborn.signalCode;
       const t0 = Date.now();
@@ -522,18 +580,28 @@ function buildFakeDocker(dir) {
       const elapsed = Date.now() - t0;
       await sleep(200);
       const dead = stubborn.exitCode !== null || stubborn.signalCode !== null;
-      check("R3-04 忽略 SIGTERM 的子进程最终被 SIGKILL 杀掉（DESK-04 回归）",
+      check("R3-04 忽略 SIGTERM 的子进程最终被杀掉（DESK-04 回归）",
         aliveBefore && dead,
         "alive_before=" + aliveBefore + " dead_after=" + dead + " elapsed_ms=" + elapsed);
-      check("R3-04 SIGKILL 发生在宽限期之后，不是立刻",
-        elapsed >= 400, "elapsed_ms=" + elapsed);
+      if (process.platform === "win32") {
+        console.log("  SKIP  R3-04 宽限期断言（Windows 的 SIGTERM 即 TerminateProcess，没有可捕获信号）");
+      } else {
+        check("R3-04 SIGKILL 发生在宽限期之后，不是立刻",
+          elapsed >= 400, "elapsed_ms=" + elapsed);
+      }
     }
 
     console.log(NL + pass + " passed, " + fail + " failed");
     process.exit(fail ? 1 : 0);
   } finally {
     process.env.PATH = savedPath;
-    process.env.HOME = savedHome;
+    try { process.chdir(savedCwd); } catch (e) { /* already gone */ }
+    if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = savedNodeOptions;
+    for (const k of homeKeys) {
+      if (savedHome[k] === undefined) delete process.env[k];
+      else process.env[k] = savedHome[k];
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   }
 })().catch((e) => { console.error("FAILED:", e.stack); process.exit(1); });

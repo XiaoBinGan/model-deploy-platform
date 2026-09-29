@@ -493,9 +493,9 @@ plan 端点不再要 token  -> 1 条失败
 
 | 项目 | 状态 |
 |---|---|
-| **在 Windows 真机上跑过** | ❌ 一次都没有。代码 + 纯函数单测 + 静态审查都有，见 W1–W11 |
+| **在 Windows 真机上跑过** | ✅ 已跑（Windows 10 19045 / i7-10700K / 32 GB / RTX 3060 12 GB）。逐条证据见 `docs/windows-verification.md`；**仍未验证**的是 WSL2 / Docker GPU 直通（机器待重启） |
 | **vLLM / SGLang 原生（macOS）** | 🚫 不可能，官方不发 macOS wheel |
-| Docker **GPU 直通** | 🚫 macOS 上无法验证（容器是 Linux 虚拟机且拿不到 GPU） |
+| Docker **GPU 直通** | 🚫 macOS 上无法验证（容器是 Linux 虚拟机且拿不到 GPU）；Windows 侧本轮被「待重启」阻塞 |
 
 #### 其他未验证项
 
@@ -503,34 +503,33 @@ plan 端点不再要 token  -> 1 条失败
 |---|---|---|
 | T1 | Docker 容器生命周期**与真实推理** | 🟡 已在 macOS 用真容器验证；**GPU 直通**与 CUDA 镜像（vLLM / SGLang）未验证 |
 | T2 | macOS 打包公证（notarization） | 未做。`electron-builder --dir --mac` 能构建，代码签名自动跳过 |
-| T3 | Windows `nsis` 安装包 | 配置已写（x64），未在 Windows 上构建/安装/运行 |
+| T3 | Windows `nsis` 安装包 | ✅ 已在 Windows 真机构建 → 安装到含中文与空格的路径 → 启动 → 卸载，全部通过；**未做代码签名**（SmartScreen 会警告） |
 
 ---
 
 ## 十二、TODO
 
-### Windows：代码已写，但**没有在 Windows 真机上验证过**
+### Windows 真机验证结论（2026-09-29，详见 `docs/windows-verification.md`）
 
-> 本项目的开发和全部测试都在 macOS（Apple M5）上完成。下面每一项都写了代码，
-> 也都有纯函数单测或静态审查，但**没有一项在真实 Windows / WSL 上执行过**。
-> 在真机复核之前，不要把这些当成「Windows 支持已完成」。
-> 逐条细节见 `docs/windows-gaps.md`。
+> 第一台 Windows 真机：Windows 10 19045 / i7-10700K / 32 GB / RTX 3060 12 GB /
+> 驱动 536.23；无 winget、无 pwsh 7；非提权会话（按需 UAC 提权）。
 
-| # | 项目 | 现状 | 需要在真机上做什么 |
+| # | 项目 | 现状 | 真机结果 |
 |---|---|---|---|
-| W1 | 整条 `probeWindows()` 路径 | 仅静态审查 + 纯函数单测 | 在真 Windows 上跑一次硬件探测，与 `systeminfo` / 任务管理器对照 |
-| W2 | 注册表读显存 `HardwareInformation.qwMemorySize`（REG_QWORD） | 按已知事实实现（`AdapterRAM` 是 uint32，>4 GB 会截断，所以不用它） | 在显存 >4 GB 的机器上确认读到的值与实际一致 |
-| W3 | `windowsGpuIsUma()` 集显判定 | 纯函数测了 30+ 个机型名 | 收集**真实机器上报的 GPU 字符串**（OEM / 驱动差异很大）复核；老 APU 与移动独显的边界最需要验 |
-| W4 | `classifyGpuVendor()` | 同上 | 确认 Windows 上报的 vendor 字符串能被正确归类 |
-| W5 | `nvidia-smi` 不在 PATH 时的回退 | 已实现三条路径（PATH / `%SystemRoot%\System32` / `NVSMI` 目录） | 在没有把 nvidia-smi 加进 PATH 的机器上确认回退生效 |
-| W6 | 多路 CPU（`Win32_Processor.Name` 返回多行） | 已去重并用 `Join(' + ')` 合并 | 在多路机器上确认 |
-| W7 | WSL2 检测（读 `/proc/version`） | 已实现 | 在真 WSL2 里确认识别成功，并确认**不再把 WSL 的内存限额当宿主机内存** |
-| W8 | `GET /api/hardware/probe.ps1` 端点 | 已实现（61 行，不依赖 Python） | 在 Windows PowerShell 5.1 **和** 7 上各跑一次 |
-| W9 | `probe-command` 的平台分派（`irm ... \| iex`） | 已按平台分派 | 在 Windows 上确认命令真能执行 |
-| W10 | electron-builder 的 **nsis 安装包** | 配置已写（x64） | 在 Windows 上 `npm run dist` 构建 → 安装 → 运行 |
-| W11 | Windows 上的 Docker GPU 路径 | 文档记录「Docker Desktop 的 GPU 支持只在 Windows 的 WSL2 后端提供」 | 在 Windows + WSL2 + NVIDIA 上实测 `--gpus all` 是否真的生效 |
+| W1 | 整条 `probeWindows()` 路径 | 仅静态审查 + 纯函数单测 | ✅ 与系统真值一致：CPU/内存 31.8 GB/RTX 3060 12 GB/vendor/uma 全对 |
+| W2 | 注册表读显存 `HardwareInformation.qwMemorySize`（REG_QWORD） | 按已知事实实现 | ✅ 12 GB 未截断（同机 `AdapterRAM` 确实截断成 4 GB，证明该绕行是必需的） |
+| W3 | `windowsGpuIsUma()` 集显判定 | 纯函数测了 30+ 个机型名 | ✅ 本机真实字符串（UHD 630/P630=UMA，RTX 3060=独显）判定正确；虚拟显示适配器归 unknown |
+| W4 | `classifyGpuVendor()` | 同上 | ✅ nvidia/intel 归类正确 |
+| W5 | `nvidia-smi` 不在 PATH 时的回退 | 已实现三条路径 | ✅ 加测「machine policy 禁读注册表」路径；**发现脚本在有虚拟适配器时仍以退出码 1 结束**，见下方 G1 |
+| W6 | 多路 CPU（`Win32_Processor.Name` 返回多行） | 已去重并用 `Join(' + ')` 合并 | ⚪ 单路机器，未验证 |
+| W7 | WSL2 检测（读 `/proc/version`） | 已实现 | ⚪ 本机 WSL 未安装（`lxss\tools` / `lxcore.sys` / `LxssManager` 全缺），无法进入该分支 |
+| W8 | `GET /api/hardware/probe.ps1` 端点 | 已实现 | 🟡 PowerShell 5.1 全绿（含 Restricted 策略下 `irm \| iex`）；**PowerShell 7 无法验证**（本机无 pwsh，也装不了） |
+| W9 | `probe-command` 的平台分派 | 已按平台分派 | ❌ 非 win32 分支依赖 `python3`，本机没有 → 命令不可执行，见 G2 |
+| W10 | electron-builder 的 **nsis 安装包** | 配置已写（x64） | ✅ 构建/安装/启动/卸载全通过；**首轮构建的包完全不可用**（漏文件，见 G0），已修 |
+| W11 | Windows 上的 Docker GPU 路径 | 文档记录只在 WSL2 后端提供 | ⚪ 需要手动重启机器后继续；本轮已把 WSL2+Docker Desktop 装到位 |
 
-**真机复核时一并确认这几个历史坑**（代码里都已修，但都没在 Windows 上验过）：
+
+**真机复核时一并确认这几个历史坑**（代码里都已修，Windows 真机上已确认前两条的判定逻辑正确，其余机型本机没有样本）：
 
 - `AMD Radeon(TM) Graphics` —— 厂商后缀 `(TM)` 曾导致匹配失败
 - `AMD Radeon 780M` 家族 —— 曾被判成独显
@@ -545,6 +544,8 @@ plan 端点不再要 token  -> 1 条失败
 - **mlx / docker / ollama 的模型获取没有统一。** 只有 llama.cpp 有这条一键链路。
 - **控制面无鉴权。**
 - **macOS GUI 启动的 app 拿不到 Homebrew 的 PATH**（系统只给 `/usr/bin:/bin:/usr/sbin:/sbin`）。
+- **Windows 上虚拟显示适配器会被当成一块没有显存的显卡。** `OrayIddDriver Device` / `GameViewer Virtual Display Adapter`（`Root\…IddDriver`）会进 GPU 列表、vendor=unknown。按最大显存挑设备时不影响结论，但它们会出现在设备列表和「未识别独立显卡」的告警里。见 `docs/windows-verification.md` G1。
+- **Windows 上 `compareToJson` 之外的控制台输出仍是代码页（GBK）编码**，`deploy.js` 现在按 `chcp` 解码，但一次性读出的一大块输出里如果跨了多字节边界，仍可能出现半个字。
 
 ---
 
@@ -584,5 +585,6 @@ plan 端点不再要 token  -> 1 条失败
 | `docs/qa-findings-desktop.md` | 桌面端 28 条 |
 | `docs/qa-findings-frontend.md` | 前端 15 条 + 后续 DESK-29 / 30 / 31 / 32 |
 | `docs/qa-round3.md` | 独立验证轮 |
-| `docs/windows-gaps.md` | Windows 缺口逐条 |
+| `docs/windows-gaps.md` | Windows 缺口逐条（**静态审查阶段**的历史文档，结论已被真机验证取代） |
+| `docs/windows-verification.md` | Windows 真机验证报告（证据 + 完成度核对表 + 本轮修复） |
 | `docs/vllm-deployment-gaps.md` | vLLM 部署缺口 |

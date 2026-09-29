@@ -37,7 +37,14 @@ TRANSFORMERS_START_TIMEOUT = float(os.environ.get("MDP_START_TIMEOUT", "60"))
 # docs/docker-design.md section 5: reject, never silently rewrite.
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$")
 _GPUS_RE = re.compile(r"^[0-9]+(,[0-9]+)*$")
-_ABS_PATH_RE = re.compile(r"^/[^:\x00]{0,400}$")
+# A bind-mount source is a path on the DOCKER HOST. The control plane cannot know
+# that host's OS (the desktop app talks to it from the user's machine), so both
+# spellings are accepted: POSIX "/..." and Windows "C:\..." / "C:/..." / UNC.
+# Before this, `C:\models` was rejected with "必须是绝对路径" — while the value the
+# user typed was in fact absolute; the message named the wrong problem.
+_ABS_PATH_RE = re.compile(r"^(?:/|\\\\|[A-Za-z]:[\\/])[^:\x00]{0,400}$")
+# The container side is always Linux: an absolute path, never a drive letter.
+_CONTAINER_PATH_RE = re.compile(r"^/[^:\x00]{0,400}$")
 MAX_VOLUMES = 8
 MAX_EXTRA_ARGS = 32
 MAX_EXTRA_ARG_LENGTH = 200
@@ -158,9 +165,13 @@ def _normalize_docker_options(image, gpus, volumes, extra_args) -> dict:
         container = volume.get("container")
         ro = volume.get("ro", False)
         if not isinstance(host, str) or not _ABS_PATH_RE.match(host):
-            raise InvalidDeploymentRequest(f"volume.host 必须是绝对路径：{host!r}")
-        if not isinstance(container, str) or not _ABS_PATH_RE.match(container):
-            raise InvalidDeploymentRequest(f"volume.container 必须是绝对路径：{container!r}")
+            raise InvalidDeploymentRequest(
+                f"volume.host 必须是绝对路径（POSIX /… 或 Windows C:\\… / UNC）：{host!r}"
+            )
+        if not isinstance(container, str) or not _CONTAINER_PATH_RE.match(container):
+            raise InvalidDeploymentRequest(
+                f"volume.container 必须是容器内的绝对路径（以 / 开头）：{container!r}"
+            )
         if not isinstance(ro, bool):
             raise InvalidDeploymentRequest(f"volume.ro 必须是布尔值：{ro!r}")
         normalized_volumes.append({"host": host, "container": container, "ro": ro})

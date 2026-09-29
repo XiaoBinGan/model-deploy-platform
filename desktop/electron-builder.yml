@@ -14,14 +14,17 @@ directories:
 
 # 只打运行必需的文件。测试脚本（smoke.js / test-*.js）、README、图标源文件
 # 都不进包。这里没有生产依赖要打（electron 是 devDependency）。
+#
+# 注意：这里必须是「main.js 的 require 闭包」，不是一份人工维护的清单。
+# 之前手写的白名单漏了 ggufdl.js / gguf.js，而 server.js:9 顶层就 require
+# "./ggufdl" —— 真机装完启动只剩一个标题为 Error 的框，本机 HTTP 服务根本
+# 没起来（Windows 安装包因此完全不可用）。现在改成 *.js 全收 + 排除测试，
+# 新增模块默认进包；配套的冒烟断言在 desktop/test-packaging.js。
 files:
-  - main.js
-  - server.js
-  - deploy.js
-  - installers.js
-  - probe.js
-  # 目前仓库没有 preload.js，有的话会被这个通配符收进来
-  - preload*.js
+  - "*.js"
+  - "!smoke.js"
+  - "!test-*.js"
+  # 目前仓库没有 preload.js，有的话会被上面的通配符收进来
   # 注意：appDir 是 desktop/，frontend/ 在仓库根，所以这条在这里匹配不到东西；
   # 页面实际由下面的 extraResources 复制到 Resources/frontend/。
   - frontend/**

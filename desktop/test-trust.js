@@ -66,6 +66,13 @@ function hostileService(reply) {
   fs.writeFileSync(model, "not really a model");
 
   // A fake llama-server that records the argv it was actually given.
+  //
+  // On POSIX that is a "#!/bin/sh" wrapper. Windows cannot execute one through
+  // spawn() with shell:false (ENOENT for the shebang file, EINVAL for a .cmd),
+  // so the in-box C# compiler builds a real .exe instead: same contract — write
+  // argv to ARGS_FILE, then serve /health on --port. Without this the
+  // "the app ran its own argv" assertions silently saw an empty file and the
+  // deployment never reached RUNNING.
   fs.writeFileSync(path.join(dir, "fake-llama.js"), [
     "const http = require(\"node:http\");",
     "const a = process.argv.slice(2);",
@@ -74,11 +81,52 @@ function hostileService(reply) {
     "s.listen(p, \"127.0.0.1\");",
     "process.on(\"SIGTERM\", () => s.close(() => process.exit(0)));",
   ].join("\n"));
-  fs.writeFileSync(path.join(bin, "llama-server"),
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argsFile + "\nexec /usr/bin/env node " +
-    path.join(dir, "fake-llama.js") + " \"$@\"\n");
-  fs.chmodSync(path.join(bin, "llama-server"), 0o755);
+  function writePosixShim() {
+    fs.writeFileSync(path.join(bin, "llama-server"),
+      "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + argsFile + "\nexec /usr/bin/env node " +
+      path.join(dir, "fake-llama.js") + " \"$@\"\n");
+    fs.chmodSync(path.join(bin, "llama-server"), 0o755);
+  }
+  function buildWindowsShim() {
+    const csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+    if (!fs.existsSync(csc)) return false;
+    const cs = path.join(dir, "FakeLlama.cs");
+    fs.writeFileSync(cs, [
+      "using System;",
+      "using System.IO;",
+      "using System.Net;",
+      "using System.Text;",
+      "class FakeLlama {",
+      "  static void Main(string[] a) {",
+      "    var f = Environment.GetEnvironmentVariable(\"ARGS_FILE\");",
+      "    if (f != null) File.WriteAllText(f, string.Join(\" \", a));",
+      "    int port = 0;",
+      "    for (int i = 0; i < a.Length - 1; i++) if (a[i] == \"--port\") int.TryParse(a[i + 1], out port);",
+      "    if (port == 0) return;",
+      "    var l = new HttpListener();",
+      "    l.Prefixes.Add(\"http://127.0.0.1:\" + port + \"/\");",
+      "    l.Start();",
+      "    while (true) {",
+      "      var c = l.GetContext();",
+      "      if (c.Request.Url.AbsolutePath != \"/health\") c.Response.StatusCode = 404;",
+      "      var b = Encoding.UTF8.GetBytes(\"ok\");",
+      "      c.Response.OutputStream.Write(b, 0, b.Length);",
+      "      c.Response.Close();",
+      "    }",
+      "  }",
+      "}",
+    ].join("\n"));
+    const r = require("node:child_process").spawnSync(csc,
+      ["/nologo", "/target:exe", "/out:" + path.join(bin, "llama-server.exe"), cs], { encoding: "utf8" });
+    return r.status === 0 && fs.existsSync(path.join(bin, "llama-server.exe"));
+  }
+  const shimOk = process.platform === "win32" ? buildWindowsShim() : (writePosixShim(), true);
+  process.env.ARGS_FILE = argsFile;
   process.env.PATH = bin + path.delimiter + process.env.PATH;
+  if (!shimOk) {
+    console.log("  SKIP  fake llama-server 未能构建（缺 csc.exe？）");
+    process.exit(1);
+  }
 
   // --- case 1: the service tries to substitute its own command ---
   const evilSvc = await hostileService({

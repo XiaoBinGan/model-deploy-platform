@@ -14,6 +14,7 @@ model loaded would mark every row as "does not fit".
 from dataclasses import dataclass, asdict
 import platform
 import subprocess
+import sys
 
 from . import gpu_table
 
@@ -101,7 +102,39 @@ def _nvidia_devices():
     return devices
 
 
+def _windows_ram():
+    """Total and available physical memory on Windows, via CIM.
+
+    /proc/meminfo does not exist here, so _os_ram() used to return (0, 0) and
+    every Windows machine without an NVIDIA card was budgeted as having no
+    memory at all: usable_vram_bytes came out 0 and the resolver refused
+    everything. profiles.py already read these two counters for the probe
+    script; this is the same source, used by the live budget path.
+    """
+    total = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                  "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
+    free_kb = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"])
+    try:
+        total_bytes = int(float(total))
+    except (TypeError, ValueError):
+        total_bytes = 0
+    try:
+        available = int(float(free_kb)) * 1024
+    except (TypeError, ValueError):
+        available = 0
+    if total_bytes <= 0:
+        return 0, 0
+    if available <= 0 or available > total_bytes:
+        # An unreadable free counter must not be reported as "nothing available";
+        # half is the same conservative fallback the macOS branch uses.
+        available = int(total_bytes * 0.5)
+    return total_bytes, available
+
+
 def _os_ram():
+    if sys.platform == "win32":
+        return _windows_ram()
     total = _sysctl_int("hw.memsize")
     if total:
         # macOS has no MemAvailable; approximate from free + inactive + speculative.

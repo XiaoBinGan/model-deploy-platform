@@ -44,6 +44,50 @@ function manual(steps) {
   return steps.map((s) => s.argv.join(" ")).join("\n");
 }
 
+// winget is normally an App Execution Alias under
+// %LOCALAPPDATA%\Microsoft\WindowsApps. That directory is frequently missing
+// from PATH (the installer only appends it to the *user* PATH for new logons),
+// and the reparse point cannot even be seen with fs.existsSync — so `where
+// winget` fails on machines where `winget` runs fine from a shell. Check the
+// directory listing the way probe.js does for nvidia-smi, then fall back to the
+// has() probe so a genuinely absent winget still reports as absent.
+const WINGET_ALIAS_DIRS = [
+  (process.env.LOCALAPPDATA || "") + "\\Microsoft\\WindowsApps",
+  (process.env.ProgramFiles || "C:\\Program Files") + "\\WindowsApps",
+];
+
+function wingetOnDisk() {
+  const fs = require("node:fs");
+  for (const dir of WINGET_ALIAS_DIRS) {
+    if (!dir) continue;
+    try {
+      // readdir, not existsSync: an App Execution Alias is a reparse point and
+      // existsSync() returns false for it.
+      if (fs.readdirSync(dir).some((n) => n.toLowerCase() === "winget.exe")) return true;
+    } catch (e) {
+      // Directory absent or unreadable: try the next one.
+    }
+  }
+  return false;
+}
+
+function wingetCandidates() {
+  const list = ["winget"];
+  for (const dir of WINGET_ALIAS_DIRS) {
+    if (dir) list.push(dir + "\\winget.exe");
+  }
+  return list;
+}
+
+// Returns the first winget that actually runs, so the install step spawns a
+// path that exists rather than a bare name that may not resolve.
+async function wingetPath(has) {
+  for (const candidate of wingetCandidates()) {
+    if (await has(candidate)) return candidate;
+  }
+  return wingetOnDisk() ? "winget" : null;
+}
+
 // Reason-only entries: there is no command that would fix these, and pretending
 // otherwise would send the user off to run something that cannot work.
 //
@@ -134,12 +178,30 @@ async function installPlan(name, ctx) {
       const steps = [{ note: "用 Homebrew 装 llama.cpp", argv: ["brew", "install", "llama.cpp"] }];
       return { ok: true, backend: name, steps, manual: manual(steps) };
     }
-    return cannot(
-      platform === "win32"
-        ? "Windows 上没有可靠的包管理器渠道，需要手动下载。"
-        : "没有找到 Homebrew，需要手动构建。",
-      "https://github.com/ggml-org/llama.cpp/releases"
-    );
+    // winget does ship an official llama.cpp package (ggml.llamacpp, a portable
+    // zip containing llama-server.exe), and the other two Windows branches in
+    // this file already use winget — so "Windows has no reliable package
+    // manager" was both wrong and inconsistent with README.md:89. winget is
+    // also the one package manager whose binary may exist as an App Execution
+    // Alias that `where` cannot see; probe.js enumerates that directory for
+    // nvidia-smi, and has() gets the same treatment through wingetCandidates().
+    if (platform === "win32") {
+      const winget = await wingetPath(has);
+      if (winget) {
+        const steps = [{
+          note: "用 winget 装 llama.cpp（官方 ggml.llamacpp 包，装的是便携版 llama-server.exe）",
+          argv: [winget, "install", "--id", "ggml.llamacpp", "-e", "--accept-source-agreements"],
+        }];
+        return { ok: true, backend: name, steps, manual: manual(steps) };
+      }
+      return cannot(
+        "这台机器上找不到 winget（App Installer）。可以手动下载官方 Windows 构建包，" +
+        "解压后把 llama-server.exe 所在目录加进 PATH。",
+        "https://github.com/ggml-org/llama.cpp/releases"
+      );
+    }
+    return cannot("没有找到 Homebrew，需要手动构建。",
+      "https://github.com/ggml-org/llama.cpp/releases");
   }
 
   if (name === "ollama") {
@@ -150,10 +212,13 @@ async function installPlan(name, ctx) {
       }];
       return { ok: true, backend: name, steps, manual: manual(steps) };
     }
-    if (platform === "win32" && (await has("winget"))) {
+    // winget may exist as an App Execution Alias that `where` cannot see, so ask
+    // wingetPath() rather than has("winget") directly.
+    const wingetForOllama = platform === "win32" ? await wingetPath(has) : null;
+    if (wingetForOllama) {
       const steps = [{
         note: "用 winget 装 Ollama（装完还需要启动一次）",
-        argv: ["winget", "install", "--id", "Ollama.Ollama", "-e", "--accept-source-agreements"],
+        argv: [wingetForOllama, "install", "--id", "Ollama.Ollama", "-e", "--accept-source-agreements"],
       }];
       return { ok: true, backend: name, steps, manual: manual(steps) };
     }
@@ -266,10 +331,11 @@ async function installPlan(name, ctx) {
       }];
       return { ok: true, backend: name, steps, manual: manual(steps), gpu };
     }
-    if (platform === "win32" && (await has("winget"))) {
+    const wingetForDocker = platform === "win32" ? await wingetPath(has) : null;
+    if (wingetForDocker) {
       const steps = [{
         note: "用 winget 装 Docker Desktop（装完需要启动一次）",
-        argv: ["winget", "install", "--id", "Docker.DockerDesktop", "-e", "--accept-source-agreements"],
+        argv: [wingetForDocker, "install", "--id", "Docker.DockerDesktop", "-e", "--accept-source-agreements"],
       }];
       return { ok: true, backend: name, steps, manual: manual(steps), gpu };
     }
