@@ -16,6 +16,12 @@ flowchart TD
 ```
 
 ![Qwen3 8B 一键下载并部署流程](docs/images/qwen3-one-click-flow.svg)
+![Qwen3 8B 一键下载并部署流程](docs/images/1.png)
+
+![Qwen3 8B 一键下载并部署流程](docs/images/2.png)
+![Qwen3 8B 一键下载并部署流程](docs/images/3.png)
+![Qwen3 8B 一键下载并部署流程](docs/images/4.png)
+
 
 上面这段不是设想。文件 **5,027,783,488 字节**、落盘魔数 `GGUF`、部署 `RUNNING`、真实推理返回上面那句 —— 都在 macOS（Apple M5 / 24 GB）上实测过。
 
