@@ -5,16 +5,17 @@
 下载一个 4.68 GB 的模型，本来是这样：去 HuggingFace 找仓库 → 在几十个文件里挑对量化 → 认出 `-00001-of-00002` 那种分片 → 下载 → 把绝对路径填进启动参数。
 这个项目把它变成点一下按钮。
 
+```mermaid
+flowchart TD
+    A[选择 Qwen3 8B · GGUF · q4_k_m<br/>点击「自动下载并部署」]
+    B[确认下载<br/>Qwen/Qwen3-8B-GGUF<br/>Qwen3-8B-Q4_K_M.gguf · 4.68 GB]
+    C[下载完成<br/>路径自动填好<br/>~/.mdp-models/Qwen--Qwen3-8B-GGUF/]
+    D[创建并启动<br/>llama.cpp · RUNNING]
+    E[/v1/chat/completions<br/>真实模型回复/]
+    A --> B --> C --> D --> E
 ```
-点「新建部署」→ 选 Qwen3 8B → 点「⤓ 自动下载并部署」→ 确认
-    ↓
-Qwen/Qwen3-8B-GGUF / q4_k_m
-文件 Qwen3-8B-Q4_K_M.gguf · 4.68 GB → ~/.mdp-models/Qwen--Qwen3-8B-GGUF/
-    ↓
-进度条跑完 → 路径自动填好 → 「创建并启动」→ RUNNING
-    ↓
-/v1/chat/completions → "我是通义千问，一个由通义实验室开发的大规模语言模型…"
-```
+
+![Qwen3 8B 一键下载并部署流程](docs/images/qwen3-one-click-flow.svg)
 
 上面这段不是设想。文件 **5,027,783,488 字节**、落盘魔数 `GGUF`、部署 `RUNNING`、真实推理返回上面那句 —— 都在 macOS（Apple M5 / 24 GB）上实测过。
 
