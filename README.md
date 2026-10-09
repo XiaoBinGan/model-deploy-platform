@@ -493,15 +493,15 @@ plan 端点不再要 token  -> 1 条失败
 
 | 项目 | 状态 |
 |---|---|
-| **在 Windows 真机上跑过** | ✅ 已跑（Windows 10 19045 / i7-10700K / 32 GB / RTX 3060 12 GB）。逐条证据见 `docs/windows-verification.md`；**仍未验证**的是 WSL2 / Docker GPU 直通（机器待重启） |
+| **在 Windows 真机上跑过** | ✅ 已跑（Windows 10 19045 / i7-10700K / 32 GB / RTX 3060 12 GB）。逐条证据见 `docs/windows-verification.md`；基础支持 17 条中 16 条 ✅（W8 的 PowerShell 7 一半无法验证），GPU 额外 6 条中 5 条 ✅，**只剩 vLLM / SGLang 真实推理**（镜像 8.41 GB，拉取中） |
 | **vLLM / SGLang 原生（macOS）** | 🚫 不可能，官方不发 macOS wheel |
-| Docker **GPU 直通** | 🚫 macOS 上无法验证（容器是 Linux 虚拟机且拿不到 GPU）；Windows 侧本轮被「待重启」阻塞 |
+| Docker **GPU 直通** | ✅ Windows 已验证（WSL2 后端，`--gpus all` + 应用自身部署链路）；🚫 macOS 上无法验证（容器是 Linux 虚拟机且拿不到 GPU） |
 
 #### 其他未验证项
 
 | # | 项目 | 现状 |
 |---|---|---|
-| T1 | Docker 容器生命周期**与真实推理** | 🟡 已在 macOS 用真容器验证；**GPU 直通**与 CUDA 镜像（vLLM / SGLang）未验证 |
+| T1 | Docker 容器生命周期**与真实推理** | ✅ CPU 与 GPU 两条路径都在 Windows 真机上跑通（应用自身后端驱动，非手写 `docker run`）；**仅 vLLM / SGLang 的官方镜像未起过**（多 GB 级，拉取中） |
 | T2 | macOS 打包公证（notarization） | 未做。`electron-builder --dir --mac` 能构建，代码签名自动跳过 |
 | T3 | Windows `nsis` 安装包 | ✅ 已在 Windows 真机构建 → 安装到含中文与空格的路径 → 启动 → 卸载，全部通过；**未做代码签名**（SmartScreen 会警告） |
 
@@ -522,11 +522,11 @@ plan 端点不再要 token  -> 1 条失败
 | W4 | `classifyGpuVendor()` | 同上 | ✅ nvidia/intel 归类正确 |
 | W5 | `nvidia-smi` 不在 PATH 时的回退 | 已实现三条路径 | ✅ 加测「machine policy 禁读注册表」路径；**发现脚本在有虚拟适配器时仍以退出码 1 结束**，见下方 G1 |
 | W6 | 多路 CPU（`Win32_Processor.Name` 返回多行） | 已去重并用 `Join(' + ')` 合并 | ⚪ 单路机器，未验证 |
-| W7 | WSL2 检测（读 `/proc/version`） | 已实现 | ⚪ 本机 WSL 未安装（`lxss\tools` / `lxcore.sys` / `LxssManager` 全缺），无法进入该分支 |
+| W7 | WSL2 检测（读 `/proc/version`） | 已实现 | ✅ 控制面的 WSL 检测已修（G3）：现在真跑 `wsl --status`；`lxss\tools` / `lxcore.sys` / LxssManager 均已落盘，`docker info` 报 `Kernel=6.18.40.1-microsoft-standard-WSL2` |
 | W8 | `GET /api/hardware/probe.ps1` 端点 | 已实现 | 🟡 PowerShell 5.1 全绿（含 Restricted 策略下 `irm \| iex`）；**PowerShell 7 无法验证**（本机无 pwsh，也装不了） |
 | W9 | `probe-command` 的平台分派 | 已按平台分派 | ❌ 非 win32 分支依赖 `python3`，本机没有 → 命令不可执行，见 G2 |
 | W10 | electron-builder 的 **nsis 安装包** | 配置已写（x64） | ✅ 构建/安装/启动/卸载全通过；**首轮构建的包完全不可用**（漏文件，见 G0），已修 |
-| W11 | Windows 上的 Docker GPU 路径 | 文档记录只在 WSL2 后端提供 | ⚪ 需要手动重启机器后继续；本轮已把 WSL2+Docker Desktop 装到位 |
+| W11 | Windows 上的 Docker GPU 路径 | 文档记录只在 WSL2 后端提供 | ✅ 已通：官方 CUDA 镜像 `--gpus all nvidia-smi` 看到 RTX 3060（driver 560.94 / CUDA 12.6）；应用自身的 docker 后端 create→RUNNING→推理→stop→delete 全通，含 `gpus=all` 与二次 start |
 
 
 **真机复核时一并确认这几个历史坑**（代码里都已修，Windows 真机上已确认前两条的判定逻辑正确，其余机型本机没有样本）：

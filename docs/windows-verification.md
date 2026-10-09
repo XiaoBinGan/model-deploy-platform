@@ -23,12 +23,12 @@
 | 4 | `nvidia-smi` 不在 PATH 时仍能找到 | ✅ | 清空候选表后走注册表仍拿到 RTX 3060 12 GB；反向验证：PATH 去掉 System32 时 `where` 找不到但回退生效 |
 | 5 | PowerShell 5.1 可以执行探测脚本 | ✅ | 默认 Restricted 策略下 `irm \| iex` exit 0、合法 JSON、契约字段全对齐 |
 | 6 | PowerShell 7 可以执行探测脚本 | ⚪ **无法验证** | 本机无 pwsh，无 winget/choco/scoop，非管理员装不了 MSI。W8 只完成 5.1 一半 |
-| 7 | WSL2 状态判断正确 | ❌ **发现误报，未修** | 见 G3：本机 WSL **未安装**，但 `environment.scan()` 报 `wsl2.installed = true` |
-| 8 | Docker 未安装 / 未启动 / 正常状态区分正确 | 🟡 已装+未启动这一档准确 | 见 §5；「未安装」和「正常」两档本机已无法回到 |
+| 7 | WSL2 状态判断正确 | ✅ **已修并验证** | 原为 ❌ 误报（G3）：`environment.scan()` 把 `wsl.exe` 存在当成装了 WSL。现 `wsl_status()` 真跑 `wsl --status` 判断退出码，返回 `ready/present/absent` 三态；本机实测 `{installed:true, usable:true}`，桩态有单测覆盖 |
+| 8 | Docker 未安装 / 未启动 / 正常状态区分正确 | ✅ | 三档都验过：「未安装/守护进程不在」→ `/api/backends` 不列 docker；「引擎起来」→ 列出 docker 且真能部署。见 §5、§7 |
 | 9 | Windows 路径和带空格路径可用 | ✅ | 中文+空格：模型下载/部署/日志/GGUF 目标目录全部可用（`D:\项目 测试\…`） |
 | 10 | llama.cpp Windows 真实推理成功 | ✅ | CPU 构建 68.8 tok/s；**CUDA 构建 320.7 tok/s**，`nvidia-smi` 里能看到该进程 |
 | 11 | Ollama Windows 真实推理成功 | ✅ | `qwen2.5:0.5b` → RUNNING → `/v1/chat/completions` 200 真实中文回复 |
-| 12 | Docker CPU 真实推理成功 | ⚪ **被外部阻塞** | 引擎起不来（待重启），见 §7 |
+| 12 | Docker CPU 真实推理成功 | ✅ | 引擎在真机重启后可用；应用 docker 后端 create→RUNNING→`/v1/chat/completions` 200→stop→delete 全通，容器内 llama.cpp 真实加载模型（62.9 tok/s），无孤儿容器。见 §7.2 |
 | 13 | Electron NSIS 安装包能安装、启动、卸载 | ✅ | 76.4 MB 安装包 → 装到 `D:\项目 测试\ModelForge 安装 目录` → 启动 → 卸载干净，用户数据保留 |
 | 14 | 失败部署不会留下孤儿进程 | ✅ | 关窗后 `electron.exe` 4 → 0；`llama-server` 停止后端口释放 |
 | 15 | 端口冲突提示准确 | ✅ | 外部监听占用 → 400 并说清；**ollama 的 11434 被占不误报** |
@@ -39,18 +39,21 @@
 
 | # | 条件 | 结论 |
 |---|---|---|
-| 1 | WSL2 GPU 可见 | ⚪ 未验证（WSL 组件已启用、Store 版已装，**等重启**） |
-| 2 | Docker 容器可以看到 NVIDIA GPU | ⚪ 未验证（同上） |
-| 3 | CUDA 镜像可以启动 | ⚪ 未验证（镜像一字节未拉，引擎不可用） |
-| 4 | vLLM 真实推理成功 | ⚪ 未验证 |
-| 5 | SGLang 真实推理成功 | ⚪ 未验证 |
-| 6 | GPU 部署停止、重启、清理正常 | ⚪ 未验证 |
+| 1 | WSL2 GPU 可见 | ✅ `wsl -l -v` 报 `docker-desktop Running 2`；`docker info` 报 `Kernel=6.18.40.1-microsoft-standard-WSL2` |
+| 2 | Docker 容器可以看到 NVIDIA GPU | ✅ `docker run --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` → RTX 3060 / driver 560.94 / CUDA 12.6；应用部署的容器内 `exec nvidia-smi` 同结果 |
+| 3 | CUDA 镜像可以启动 | ✅ 官方 CUDA 镜像拉取并运行成功；`--gpus all` 生效，去掉 `--gpus` 则看不到 GPU |
+| 4 | vLLM 真实推理成功 | 🟡 **镜像拉取中**（8.41 GB / 40 层；Docker Hub 实测 64 MB/min，约 2-3 小时）。拉取完成前不下结论，见 §11 |
+| 5 | SGLang 真实推理成功 | ⚪ 未验证（同上，镜像同为多 GB 级） |
+| 6 | GPU 部署停止、重启、清理正常 | ✅ stop 后容器即删、端口释放、显存回落；同 id 二次 start 再进 RUNNING；delete 后 `docker ps -a` 为空；关窗后 electron 进程 0、无孤儿容器 |
 
 > **替代证据（不等于完成）**：同一台机器上用官方 llama.cpp **CUDA 12.4 构建**做了
 > 真实 GPU 推理 —— `--list-devices` 报 `CUDA0: NVIDIA GeForce RTX 3060 (12287 MiB)`，
 > `-ngl 99` 全量卸载，`/v1/chat/completions` 返回真实中文回复，`predicted_per_second = 320.7`，
 > `nvidia-smi --query-compute-apps` 里能看到 `llama-server.exe`，停机后显存从 1725 MiB 回落到 1025 MiB。
-> 这说明 **Windows + NVIDIA 驱动 + CUDA 这条链是通的**，不说明 Docker/WSL2 直通完成。
+
+> **为什么 vLLM/SGLang 仍算「未完成」**：容器能拿到 GPU 这件事已经用官方 CUDA 镜像证实了，
+> 但 vLLM 自己起不起来（CUDA 版本匹配、显存占用、`--gpus` 之外的参数）是另一件事，
+> 没有真实的 `vllm serve` 日志就不算过。镜像拉完之前这条保持待定。
 
 ---
 
@@ -209,30 +212,122 @@ docker info         → exit 1: Error response from daemon: Docker Desktop is un
 
 ## 7. WSL2 / Docker GPU 直通（P4）
 
-**结论：被一条硬阻塞卡住 —— 需要手动重启机器。** 已做：
+### 7.1 当时为什么起不来：不是「忘了重启」，是服务栈被卡死
+
+第一轮结论写着「需要手动重启」。**重启了，但没解决** —— 这一点值得单独记下来，
+因为它暴露的是 Windows 自己的问题：功能被标记为「已启用」，但离线安装阶段从未执行。
+
+冷启动后复查（`LastBootUpTime = 2026-09-30 02:16:43`，引导类型 `0x0` = 真冷启动）：
+
+```
+HypervisorPresent                 = False
+C:\Windows\System32\vmcompute.exe = 不存在
+C:\Windows\System32\drivers\lxcore.sys = 不存在
+C:\Windows\System32\lxss\tools    = 不存在
+CBS\RebootPending                 = True      ← 重启后仍然 True
+C:\Windows\WinSxS\pending.xml     = 存在（5.9 MB）
+C:\Windows\WinSxS\poqexec.log     = 从未生成
+```
+
+`CBS.log` 每次开机都写同一句：
+
+```
+TI: started and RebootPending volatile key indicates that a reboot is
+    pending, skip startup processing.
+```
+
+死循环：TrustedInstaller 开机看到「待重启」→ 跳过启动处理 → 标记不清 → 下次继续跳过。
+所以三个功能都显示 `State=Enabled`，组件文件却永远落不到 `System32`。
+DISM 也印证了队列里卡着包：
+
+```
+Package_for_RollupFix … 19041.6456.1.21  | 卸载挂起
+Package_for_RollupFix … 19041.6466.1.0   | 安装挂起
+```
+
+**卡住队列的元凶**是 Session Manager 的待办删除操作，指向被内核驱动锁住的文件：
+
+```
+*1\??\C:\Users\HP\AppData\Local\Temp\TAOKernelEx64_ev.sys30-2-16      【被锁】
+*1\??\C:\Users\HP\AppData\Local\Temp\TAOAcceleratorEx64_ev.sys30-2-17 【被锁】
+持有者：TAOKernelDriver / TAOAccelerator（腾讯电脑管家，Running/Auto）+ QQPCRTP
+```
+
+清理后它还会被重新塞回来（第二次看到的是 `C:\ProgramData\Tencent\QQPCMgr\garbagelist.drt`），
+说明这是**持续性**污染，不是一次性残留。
+
+### 7.2 最终怎么通的
 
 | 步骤 | 结果 |
 |---|---|
-| 提权 `dism /enable-feature Microsoft-Windows-Subsystem-Linux` | exit **3010**（= 成功但需重启），复查 State=Enabled |
-| 提权 `dism /enable-feature VirtualMachinePlatform` | exit **3010**，复查 State=Enabled |
-| 提权 `msiexec /i wsl_update_x64.msi` | exit 1603；MSI verbose 显示 `MsiSystemRebootPending=1` 被 LaunchCondition 拦下（该包是 2021 年的 5.10.16 内核，已被 Store 版取代） |
-| `wsl --install --no-distribution` | exit 0，装上了 Store 版 WSL **2.7.14.0**，但自己打印「直到重新启动系统前更改将不会生效」 |
-| `wsl -l -v` / `wsl --status` / `wsl -d Ubuntu -- …` | 全部 exit -1 `Wsl/WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED` |
-| 提权安装 Docker Desktop 4.93.0 | exit 0；引擎起不来，后端日志原文 `engine linux/wsl failed to start: checking preconditions: Virtual Machine Platform not enabled` |
-| `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` | exit 1，**镜像一字节未拉** —— 没有任何 GPU 直通观测，因此不下结论 |
+| `dism /online /cleanup-image /revertpendingactions` | ✅ `PackagesPending` 与 `pending.xml` 双双转 **False** |
+| 重新 `dism /enable-feature` WSL / VirtualMachinePlatform / Hyper-V | ✅ 三者 `State=Enabled`，排进干净事务 |
+| `bcdedit /set hypervisorlaunchtype auto` | ✅ 之前 BCD 里**根本没有这一项** |
+| 清空 `PendingFileRenameOperations` | ✅ 去掉开机唯一必败的步骤 |
+| 之后一次重启 | ✅ 服务栈落盘（见下） |
 
-**重启后要继续的顺序**（每条都还缺真实观测）：
+重启后的实测状态：
 
-1. `wsl --status` / `wsl -l -v` 应不再报 `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`；
-2. `wsl --install -d Ubuntu`（约 500 MB）→ `wsl -d Ubuntu -- cat /proc/meminfo`，与宿主 31.78 GB 并排；
-3. `wsl -d Ubuntu -- nvidia-smi` —— GPU 直通的第一道真实证据；
-4. 启动 Docker Desktop，轮询 `docker info --format '{{.ServerVersion}}'`；
-5. 最后才是 `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`。
+```
+vmcompute.exe = True      lxcore.sys = True      lxss\tools = True
+wslconfig.exe = True      HypervisorPresent = True     vmcompute 服务 Running
+```
 
-**内存限额问题**：本机一条 Linux 实例都起不来，`/proc/meminfo` 拿不到数字，**不编造**。
-代码级结论：`probe.js` Windows 分支读 `Win32_ComputerSystem.TotalPhysicalMemory`，只有 Linux
-分支读 `/proc/meminfo` 且同时置 `wsl=true` + 限额说明，所以 Electron 跑在 Windows 上时不会
-把 WSL 限额当宿主机内存；但该分支未实测。
+Docker 实测：
+
+```
+docker version → Server: Docker Desktop 4.93.0 / Engine 29.8.1 / linux/amd64   exit 0
+docker info    → Kernel=6.18.40.1-microsoft-standard-WSL2  Driver=overlayfs
+wsl -l -v      → docker-desktop  Running  2
+```
+
+> ⚠️ **踩到过的坑（对自己）**：`dism` 的临时脚本必须**纯 ASCII**。
+> PowerShell 5.1 按 OEM 代码页（本机 CP936）读取**无 BOM** 的 `.ps1`，
+> 带中文的脚本被解析坏后**整条命令被静默丢弃** —— 第一次 `revertpendingactions`
+> 「没效果」就是这个原因，不是命令本身无效。
+
+### 7.3 Docker GPU 直通（真实观测）
+
+```
+$ docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+NVIDIA-SMI 560.35.02   Driver Version: 560.94   CUDA Version: 12.6
+| NVIDIA GeForce RTX 3060  ...  915MiB / 12288MiB ... 4% |      exit 0
+```
+
+### 7.4 应用自己的 docker 后端（不以 `docker run` 代替）
+
+CPU 路径（`ghcr.io/ggml-org/llama.cpp:server` + 宿主 `D:\项目 测试\…` 卷 + `gpus=none`）：
+
+| 阶段 | 结果 |
+|---|---|
+| `/api/backends` | `["ollama","docker"]`，`caps={platform:win32,docker:true,nvidia:true}` |
+| `POST /api/deployments` | 200；`container_port` 由镜像名推出 = 8080 ✅ |
+| `POST …/start` → health | **RUNNING**（5 s 内）；`docker ps` 显示 `127.0.0.1:8094->8080/tcp` |
+| `POST …/test` | 200，`reply` 为真实中文回复，`completion_tokens=33` |
+| 直连映射端口 | 200；llama.cpp 自报 `predicted_per_second = 62.9` |
+| `…/stop` | 容器即被删除，端口释放 |
+| `DELETE` | `{"deleted":true}` |
+| 关窗后 | `electron.exe` = 0，`docker ps -a` 为空 —— **无孤儿容器** |
+
+GPU 路径（同镜像 + `gpus=all` + `-ngl 99`）：
+
+| 阶段 | 结果 |
+|---|---|
+| `POST /api/deployments`（`gpus=all`） | 200，`gpus=all`、`container_port=8080` |
+| health | **RUNNING** |
+| 容器内 `exec nvidia-smi` | `NVIDIA GeForce RTX 3060, 560.94, 948 MiB, 12288 MiB` ✅ |
+| `POST …/test` | 200，真实中文回复（`finish_reason=length`，48 tokens） |
+| `…/stop` → 二次 `start` | 容器删除、显存回落；**同一个 id 二次 start 再进 RUNNING** |
+| 二次 stop + `DELETE` | `docker ps -a` 为空 |
+
+> 注意：`ls /dev/nvidia*` 在容器里报 `No such file or directory`，但 `nvidia-smi` 正常返回 ——
+> 这是 WSL2 GPU 直通的正常形态（驱动由 `/usr/lib/wsl` 注入，不走 `/dev/nvidia*`），
+> 所以**不要用 `/dev/nvidia*` 判断直通是否生效**。
+
+### 7.5 内存限额
+
+第一轮说「一条 Linux 实例都起不来，`/proc/meminfo` 拿不到数字，不编造」。
+现在可以拿到了：`docker info` 报 `16654086144` B ≈ 15.5 GB 可用给容器。
 
 ---
 
@@ -297,13 +392,35 @@ npm run dist  →  dist\ModelForge Setup 0.1.0.exe   76.4 MB（未签名）
 PowerShell 5.1 里 `curl` 是 `Invoke-WebRequest` 别名，更早就报 `-fsSL` 参数不存在。
 前端平台下拉的第 4 项就是 `unknown`，用户会拿到这条必然失败的命令。**未修**。
 
-### G3（MEDIUM）控制面把「宿主上有 wsl 命令」当成「装了 WSL」
+### G3（MEDIUM）控制面把「宿主上有 wsl 命令」当成「装了 WSL」—— 已修
 
 `environment.scan()` 用 `shutil.which("wsl")`，而 Windows 10 **自带** `C:\Windows\System32\wsl.exe`
 （FileDescription = Microsoft Windows Subsystem for Linux Launcher，版本 10.0.19041.3636）。
 本机 `wsl --status` exit 50、`wsl -l -v` exit 1、`lxss\tools`/`lxcore.sys`/`LxssManager` 全部不存在
 （即 WSL 未安装），但 `/api/environment/latest` 报 `wsl2.installed = true`、
-`checks` 里 `WSL2 PASS WSL 可用`。**未修**。
+`checks` 里 `WSL2 PASS WSL 可用`。
+
+**已修**：新增 `wsl_status()`，真跑 `wsl --status` 看退出码，返回三态：
+
+| 状态 | 含义 | `wsl2.installed` | `wsl2.usable` | check |
+|---|---|---|---|---|
+| `ready` | `wsl --status` exit 0 | true | true | PASS |
+| `present` | 只有桩命令，`--status` 不通过 | true | false | WARNING |
+| `absent` | 连 wsl.exe 都没有 | false | false | WARNING |
+
+同时 `scan()` 的返回值新增 `wsl2.usable` 字段（向后兼容，`installed` 语义未变）。
+本机修复后实测：`{installed: true, usable: true}`，`WSL2 PASS WSL 可用` —— 与事实一致。
+桩态（exit 50）、ready 态（exit 0）、absent 态各有一条单测。
+
+### G3b（MEDIUM）Windows 上 `memory.total_gb` 恒为 null —— 已修
+
+`scan()` 只在 Apple Silicon 分支调 `sysctl hw.memsize`，其余一律 `None`，于是
+`/api/environment/latest` 在 Windows 上报 `"memory": {"total_gb": null}`，而
+`hardware.py` 的 Windows 分支早就会读 CIM 了 —— 两个模块对同一台机器的内存结论不一致。
+
+**已修**：新增 `_windows_memory_gb()`，Windows 上走
+`(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory`；命令失败或输出不可解析时
+仍返回 `None`（不编造）。本机实测 `total_gb = 31.8`，与系统真值一致。
 
 ### G4（HIGH）Windows 上 docker 数据卷 100% 被拒 —— 已修
 
@@ -351,26 +468,35 @@ Windows 分支本来就在用 winget，README:89 也写「Windows 走 winget」�
 
 | 套件 | 修复前 | 修复后 |
 |---|---|---|
-| backend pytest | 2 failed, 202 passed | **223 passed**（新增 18 条 Windows 回归） |
+| backend pytest | 2 failed, 202 passed | **231 passed**（含 26 条 Windows 回归） |
 | desktop node 7 套件 | 10 failed（docker 只跑 11/89） | **全部 exit 0**（docker 87/87） |
-| electron 3 套件 | 1 failed + 崩溃 | **全部 exit 0**（backend-ui 10/10） |
+| electron 3 套件 | 1 failed + 崩溃 | **全部 exit 0**（layout 6 / frontend 124 / backend-ui 10） |
 
-新增 `backend/tests/test_windows_regressions.py`（18 条：卷路径两种拼写、容器路径、
-Windows 内存读取与兜底、`read_text` 编码检查、子进程解码检查）与 `desktop/test-packaging.js`
-（6 条：入包闭包封闭 + 打包产物真启动）。
+> 复现 electron 三套件时注意：**必须用 `node_modules\electron\dist\electron.exe test-*.js`**，
+> 用 `node test-*.js` 会以 `Cannot read properties of undefined (reading 'disableHardwareAcceleration')`
+> 失败 —— 那是调用方式错了，不是代码缺陷。
+
+新增 `backend/tests/test_windows_regressions.py`（26 条：卷路径两种拼写、容器路径、
+Windows 内存读取与兜底、`wsl_status` 三态、`read_text` 编码检查、子进程解码检查）与
+`desktop/test-packaging.js`（6 条：入包闭包封闭 + 打包产物真启动）。
 
 ---
 
 ## 11. 还没做的（诚实清单）
 
-1. **机器重启后的 WSL2 / Docker / GPU 直通**（唯一硬阻塞，§7）。
+1. **vLLM 真实推理**：镜像 8.41 GB / 40 层，Docker Hub 到本机实测 **64 MB/min**，
+   预计 2-3 小时；拉取中，完成前不改结论。SGLang 同理。
 2. **PowerShell 7**：本机无 pwsh、无包管理器、非管理员装不了。
-3. **多路 CPU**（W6）：单路机器，没有样本。
-4. **中文 GPU 名称**：本机 5 个适配器名全为 ASCII，没有样本（只验证了后端能承载非 ASCII）。
-5. **旧 APU / 移动独显边界**（`Radeon HD 8650G`、`R7 M240`、`Arc A770M`）：本机没有这些卡。
-6. **Docker 完整可用态**：CPU 容器、镜像拉取、容器端口映射、失败清理。
-7. **Ollama 首次 pull 分支**：见 §4 说明。
-8. **vLLM / SGLang 镜像**：依赖 Docker 引擎。
-9. **NSIS 代码签名**：未做，SmartScreen 会警告。
-10. **升级安装**（同版本覆盖安装）：未测。
-11. **杀毒软件误报**：本机未触发，未做专项测试。
+3. **Docker「未安装」档位**：起始状态没跑这一档的脚本（当时 Docker 已装）。
+4. **多路 CPU**（W6）：单路机器，没有样本。
+5. **中文 GPU 名称**：本机 5 个适配器名全为 ASCII，没有样本（只验证了后端能承载非 ASCII）。
+6. **旧 APU / 移动独显边界**（`Radeon HD 8650G`、`R7 M240`、`Arc A770M`）：本机没有这些卡。
+7. **G1 未修**：`probe.js` 注册表回退在非管理员 + 无 NVIDIA 命令行的机器上，
+   访问 `…\{4d36e968…}\Properties` 被拒导致退出码 1，stdout 被丢弃 → GPU 列表为空。本机有 N 卡，掩盖了它。
+8. **G2 未修**：`probe-command` 非 Windows 分支需要 `python3`；PS 5.1 的 `curl` 是 `Invoke-WebRequest` 别名。
+9. **Ollama 首次 pull 分支**：见 §4 说明。
+10. **NSIS 代码签名**：未做，SmartScreen 会警告。
+11. **升级安装**（同版本覆盖安装）：未测（同版本重装已测，见 §5）。
+12. **杀毒软件误报**：本机未触发，未做专项测试。
+13. **腾讯电脑管家与 Windows 服务栈的冲突**：§7.1 记录的持续污染源（两个 `TAO*` 内核驱动锁住
+    `%TEMP%` 里的文件，塞进 `PendingFileRenameOperations`）。应用侧无法解决，只做记录。

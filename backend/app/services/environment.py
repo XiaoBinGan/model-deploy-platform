@@ -42,27 +42,78 @@ def nvidia_devices():
         gpu.append({"index":len(gpu),"name":parts[0],"memory_total_mb":total_mb,"memory_free_mb":free_mb,"driver_version":parts[3],"memory_type":"dedicated"})
     return gpu
 
+def _windows_memory_gb():
+    """Total physical memory on Windows via CIM.
+
+    /proc/meminfo does not exist here and sysctl is macOS-only, so `scan()`
+    reported `memory.total_gb = null` on every Windows host.
+    """
+    value = run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
+    try:
+        return round(int(float(value)) / 1024 ** 3, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def wsl_status():
+    """Is the Windows Subsystem for Linux actually usable, not just present?
+
+    `shutil.which("wsl")` is not enough: Windows 10 and 11 both ship wsl.exe as an
+    inbox stub whether or not the optional component is installed, so the old
+    check reported "WSL available" on machines where `wsl --status` exits 50 with
+    WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED. Ask wsl.exe instead, and treat a
+    non-zero exit as "not usable".
+
+    Returns one of "ready" / "present" / "absent".
+    """
+    if not shutil.which("wsl"):
+        return "absent"
+    try:
+        p = subprocess.run(["wsl", "--status"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=10)
+        if p.returncode == 0:
+            return "ready"
+    except Exception:
+        pass
+    return "present"
+
+
 def scan():
     system=platform.system(); architecture=platform.machine(); gpu=nvidia_devices()
     apple_silicon=is_apple_silicon(system, architecture)
     memory_total=_sysctl("hw.memsize") if apple_silicon else None
     memory_total_gb=round(memory_total/1024**3,1) if memory_total else None
+    if memory_total_gb is None and system == "Windows":
+        memory_total_gb=_windows_memory_gb()
     if apple_silicon:
         gpu=[{"index":0,"name":"Apple Silicon GPU (Metal)","memory_total_mb":int(memory_total/1024**2) if memory_total else None,"memory_free_mb":None,"driver_version":"Metal","memory_type":"unified"}]
     # shutil.which only proves the docker CLI is on PATH. It says nothing about
     # whether the daemon is alive, and this endpoint does not pretend otherwise:
     # probing the daemon would need a real docker call we do not make here.
-    docker_cli=bool(shutil.which("docker")); wsl=bool(shutil.which("wsl"))
+    docker_cli=bool(shutil.which("docker"))
+    # wsl.exe ships as a stub on every Windows install, so presence is not
+    # capability; see wsl_status(). Normalised to the same tri-state everywhere so
+    # "installed" cannot accidentally mean "the string 'absent' is truthy".
+    if system == "Windows":
+        wsl_state = wsl_status()
+    else:
+        wsl_state = "ready" if shutil.which("wsl") else "absent"
+    wsl_installed = wsl_state != "absent"
+    wsl_usable = wsl_state == "ready"
     docker_check={"name":"Docker","status":"PASS" if docker_cli else "UNKNOWN","message":"PATH 中有 docker 命令（未探测守护进程是否运行）" if docker_cli else "未安装 docker 命令"}
     checks=[{"name":"GPU","status":"PASS" if gpu else "WARNING","message":"检测到 Apple Silicon GPU，可使用统一内存" if apple_silicon else ("检测到 NVIDIA GPU" if gpu else "未检测到可用 GPU")},docker_check]
     if apple_silicon:
         checks += [{"name":"Metal","status":"PASS","message":"Apple Metal 可用；GPU 与 CPU 共用统一内存"},{"name":"MLX","status":"UNKNOWN","message":"Apple Silicon 的高吞吐本地推理路径（pip install mlx-lm）"},{"name":"CUDA","status":"NOT_APPLICABLE","message":"Apple Silicon 不使用 CUDA/nvidia-smi"}]
-    else: checks += [{"name":"WSL2","status":"PASS" if wsl else "UNKNOWN","message":"WSL 可用" if wsl else "未检测到 WSL"}]
+    elif system == "Windows":
+        wsl_msg = {"ready": "WSL 可用", "present": "只找到 wsl.exe 命令，但 `wsl --status` 不通过（组件未启用或未装发行版）", "absent": "未检测到 WSL"}[wsl_state]
+        checks += [{"name":"WSL2","status":"PASS" if wsl_usable else "WARNING","message":wsl_msg}]
+    else: checks += [{"name":"WSL2","status":"PASS" if wsl_installed else "UNKNOWN","message":"WSL 可用" if wsl_installed else "未检测到 WSL"}]
     recommended=["ollama","mlx"] if apple_silicon else ["vllm","sglang","ollama","transformers"]
     # "可用" here means the CLI exists; the contract's daemon check is a desktop
     # concern, so the recommendation stays honest via the Docker check message.
     if docker_cli: recommended.append("docker")
-    return {"os":system,"architecture":architecture,"python":platform.python_version(),"cpu_cores":os.cpu_count(),"gpu":gpu,"apple_silicon":apple_silicon,"memory":{"total_gb":memory_total_gb,"type":"unified" if apple_silicon else "unknown"},"docker":{"installed":docker_cli,"cli":docker_cli,"daemon":"unknown"},"wsl2":{"installed":wsl},"recommended_backends":recommended,"status":"PASS" if gpu else "WARNING","checks":checks}
+    return {"os":system,"architecture":architecture,"python":platform.python_version(),"cpu_cores":os.cpu_count(),"gpu":gpu,"apple_silicon":apple_silicon,"memory":{"total_gb":memory_total_gb,"type":"unified" if apple_silicon else "unknown"},"docker":{"installed":docker_cli,"cli":docker_cli,"daemon":"unknown"},"wsl2":{"installed":wsl_installed,"usable":wsl_usable},"recommended_backends":recommended,"status":"PASS" if gpu else "WARNING","checks":checks}
 
 @router.post("/environment/scan")
 def environment_scan(): return scan()
